@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RaceChrono Lap Viewer</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1117;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+
+        #drop-zone {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            border: 3px dashed #333;
+            margin: 20px;
+            border-radius: 16px;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        #drop-zone.dragover {
+            border-color: #4a9eff;
+            background: rgba(74, 158, 255, 0.05);
+        }
+
+        #drop-zone h1 {
+            font-size: 2rem;
+            margin-bottom: 12px;
+            color: #fff;
+        }
+
+        #drop-zone p {
+            font-size: 1.1rem;
+            color: #888;
+        }
+
+        #dashboard {
+            display: none;
+            padding: 20px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        #dashboard.visible {
+            display: block;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #181a20;
+            border-radius: 12px;
+            border: 1px solid #2a2d35;
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .header .meta {
+            display: flex;
+            gap: 24px;
+            justify-content: center;
+            flex-wrap: wrap;
+            color: #999;
+            font-size: 0.95rem;
+        }
+
+        .header .meta span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .header .meta .label {
+            color: #666;
+        }
+
+        .track-section {
+            margin-bottom: 30px;
+        }
+
+        .track-container {
+            background: #181a20;
+            border-radius: 12px;
+            border: 1px solid #2a2d35;
+            padding: 20px;
+            position: relative;
+        }
+
+        .track-container h2 {
+            font-size: 1.2rem;
+            color: #ccc;
+            margin-bottom: 16px;
+        }
+
+        #track-canvas {
+            width: 100%;
+            height: 700px;
+            border-radius: 8px;
+            background: #12141a;
+            cursor: grab;
+        }
+
+        #track-canvas:active {
+            cursor: grabbing;
+        }
+
+        .track-controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            align-items: center;
+        }
+
+        .track-controls button {
+            background: #1e2028;
+            border: 1px solid #2a2d35;
+            color: #ccc;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+
+        .track-controls button:hover {
+            background: #2a2d35;
+        }
+
+        .track-controls .hint {
+            color: #555;
+            font-size: 0.8rem;
+            margin-left: auto;
+        }
+
+        .speed-legend {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 12px;
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        .speed-gradient {
+            height: 12px;
+            width: 200px;
+            border-radius: 6px;
+            background: linear-gradient(to right, #3b82f6, #22c55e, #eab308, #ef4444);
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(700px, 1fr));
+            gap: 20px;
+        }
+
+        .chart-card {
+            background: #181a20;
+            border-radius: 12px;
+            border: 1px solid #2a2d35;
+            padding: 20px;
+        }
+
+        .chart-card h3 {
+            font-size: 1rem;
+            color: #ccc;
+            margin-bottom: 12px;
+        }
+
+        .chart-card .chart-wrap {
+            position: relative;
+            height: 250px;
+        }
+
+        .stats-row {
+            display: flex;
+            gap: 16px;
+            margin-top: 10px;
+            font-size: 0.8rem;
+            color: #777;
+        }
+
+        .stats-row span {
+            background: #1e2028;
+            padding: 4px 10px;
+            border-radius: 6px;
+        }
+
+        .stats-row .val {
+            color: #bbb;
+            font-weight: 600;
+        }
+
+        #hover-info {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(24, 26, 32, 0.95);
+            border: 1px solid #2a2d35;
+            border-radius: 10px;
+            padding: 12px 16px;
+            font-size: 0.85rem;
+            pointer-events: none;
+            display: none;
+            z-index: 100;
+            min-width: 160px;
+        }
+
+        #hover-info .hi-label { color: #888; }
+        #hover-info .hi-val { color: #fff; font-weight: 600; }
+
+        @media (max-width: 800px) {
+            .charts-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<div id="drop-zone">
+    <h1>RaceChrono Lap Viewer</h1>
+    <p>Drag &amp; drop a RaceChrono CSV file here</p>
+</div>
+
+<div id="dashboard">
+    <div class="header">
+        <h1 id="session-title"></h1>
+        <div class="meta" id="session-meta"></div>
+    </div>
+    <div class="track-section">
+        <div class="track-container">
+            <h2>Driving Line</h2>
+            <canvas id="track-canvas"></canvas>
+            <div class="track-controls">
+                <button id="zoom-in">+ Zoom In</button>
+                <button id="zoom-out">- Zoom Out</button>
+                <button id="zoom-reset">Reset View</button>
+                <div class="speed-legend" style="margin:0;">
+                    <span>Slow</span>
+                    <div class="speed-gradient"></div>
+                    <span>Fast</span>
+                </div>
+                <span class="hint">Scroll to zoom &middot; Drag to pan</span>
+            </div>
+        </div>
+    </div>
+    <div class="charts-grid" id="charts-grid"></div>
+</div>
+
+<div id="hover-info"></div>
+
+<script>
+const SKIP_COLUMNS = new Set([
+    'timestamp', 'fragment_id', 'lap_number', 'fix_type'
+]);
+
+const CHANNEL_COLORS = {
+    speed:            '#3b82f6',
+    rpm:              '#ef4444',
+    accelerator_pos:  '#22c55e',
+    brake_pos:        '#f97316',
+    coolant_temp:     '#a855f7',
+    engine_oil_temp:  '#ec4899',
+    air_temp:         '#06b6d4',
+    fuel_level:       '#eab308',
+    altitude:         '#8b5cf6',
+    bearing:          '#14b8a6',
+    accuracy:         '#64748b',
+    satellites:       '#0ea5e9',
+    combined_acc:     '#f43f5e',
+    lateral_acc:      '#d946ef',
+    longitudinal_acc: '#fb923c',
+    lean_angle:       '#2dd4bf',
+    distance_traveled:'#84cc16',
+    elapsed_time:     '#78716c',
+    device_update_rate:'#94a3b8',
+};
+
+const DEFAULT_COLOR = '#6366f1';
+
+// ── CSV parsing ──────────────────────────────────────────────────────────
+
+function parseCSV(text) {
+    const lines = text.split(/\r?\n/);
+    const meta = {};
+
+    // Parse header metadata (lines before the column header row)
+    let dataStartIdx = 0;
+    for (let i = 0; i < Math.min(lines.length, 20); i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('timestamp,') || line.startsWith('"timestamp"')) {
+            dataStartIdx = i;
+            break;
+        }
+        // Parse key,value metadata
+        const match = line.match(/^([^,]+),(.+)$/);
+        if (match) {
+            const key = match[1].trim().toLowerCase().replace(/\s+/g, '_');
+            const val = match[2].replace(/^"|"$/g, '').trim();
+            meta[key] = val;
+        }
+    }
+
+    // Column names row
+    const colNames = splitCSVRow(lines[dataStartIdx]);
+    // Units row
+    const units = dataStartIdx + 1 < lines.length ? splitCSVRow(lines[dataStartIdx + 1]) : [];
+    // Source row
+    const sources = dataStartIdx + 2 < lines.length ? splitCSVRow(lines[dataStartIdx + 2]) : [];
+
+    // Disambiguate duplicate column names using source
+    const finalNames = [];
+    const nameCounts = {};
+    for (let i = 0; i < colNames.length; i++) {
+        let name = colNames[i].trim();
+        if (!nameCounts[name]) nameCounts[name] = 0;
+        nameCounts[name]++;
+    }
+
+    const nameIndex = {};
+    for (let i = 0; i < colNames.length; i++) {
+        let name = colNames[i].trim();
+        if (nameCounts[name] > 1) {
+            const src = (sources[i] || '').trim();
+            let suffix = '';
+            if (src.includes('canbus')) suffix = '_canbus';
+            else if (src.includes('calc')) suffix = '_calc';
+            else if (src.includes('gps')) suffix = '_gps';
+
+            if (!nameIndex[name]) nameIndex[name] = 0;
+            nameIndex[name]++;
+            if (nameIndex[name] > 1 || suffix === '') {
+                suffix = suffix + '_' + nameIndex[name];
+            }
+            name = name + suffix;
+        }
+        finalNames.push(name);
+    }
+
+    // Parse data rows
+    const data = [];
+    for (let i = dataStartIdx + 3; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const vals = splitCSVRow(line);
+        const row = {};
+        for (let j = 0; j < finalNames.length; j++) {
+            const v = (vals[j] || '').trim();
+            row[finalNames[j]] = v === '' ? null : Number(v);
+        }
+        data.push(row);
+    }
+
+    return { meta, columns: finalNames, units, sources, data };
+}
+
+function splitCSVRow(line) {
+    const result = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+            inQuotes = !inQuotes;
+        } else if (ch === ',' && !inQuotes) {
+            result.push(current);
+            current = '';
+        } else {
+            current += ch;
+        }
+    }
+    result.push(current);
+    return result;
+}
+
+// ── Track rendering with zoom & pan ──────────────────────────────────────
+
+let trackState = null;
+
+function initTrack(canvas, data) {
+    const lats = [], lons = [], speeds = [];
+    for (const row of data) {
+        const lat = row.latitude;
+        const lon = row.longitude;
+        if (lat == null || lon == null) continue;
+        lats.push(lat);
+        lons.push(lon);
+        const spd = row.speed_gps ?? row.speed ?? row['speed_canbus'] ?? 0;
+        speeds.push(spd);
+    }
+
+    if (lats.length < 2) return;
+
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+    const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+    const midLat = (minLat + maxLat) / 2;
+    const lonScale = Math.cos(midLat * Math.PI / 180);
+
+    const validSpeeds = speeds.filter(s => s != null && s > 0);
+    const minSpeed = validSpeeds.length ? Math.min(...validSpeeds) : 0;
+    const maxSpeed = validSpeeds.length ? Math.max(...validSpeeds) : 1;
+
+    // Pre-compute color per segment as RGB array for speed
+    const colors = speeds.map(spd => speedColor(spd, minSpeed, maxSpeed));
+
+    trackState = {
+        lats, lons, speeds, colors,
+        minLat, maxLat, minLon, maxLon,
+        lonScale,
+        zoom: 1,
+        panX: 0, panY: 0,
+        dragging: false,
+        lastMouse: null,
+    };
+
+    drawTrack(canvas);
+    setupTrackInteraction(canvas);
+}
+
+function drawTrack(canvas) {
+    const s = trackState;
+    if (!s) return;
+
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const w = rect.width;
+    const h = rect.height;
+    const pad = 40;
+
+    const dLat = s.maxLat - s.minLat || 1e-6;
+    const dLon = (s.maxLon - s.minLon) * s.lonScale || 1e-6;
+
+    const baseScaleX = (w - 2 * pad) / dLon;
+    const baseScaleY = (h - 2 * pad) / dLat;
+    const baseScale = Math.min(baseScaleX, baseScaleY);
+    const scale = baseScale * s.zoom;
+
+    const trackW = dLon * scale;
+    const trackH = dLat * scale;
+    const offX = (w - trackW) / 2 + s.panX;
+    const offY = (h - trackH) / 2 + s.panY;
+
+    function toCanvas(lat, lon) {
+        const x = offX + (lon - s.minLon) * s.lonScale * scale;
+        const y = offY + trackH - (lat - s.minLat) * scale;
+        return [x, y];
+    }
+
+    // Clear
+    ctx.clearRect(0, 0, w, h);
+
+    // Adaptive line width: thinner when zoomed in so individual points stay crisp
+    const lineW = Math.max(1, Math.min(2, 2 / s.zoom));
+    const shadowW = lineW + 4;
+
+    // Draw track shadow (single path for performance)
+    ctx.beginPath();
+    const [sx, sy] = toCanvas(s.lats[0], s.lons[0]);
+    ctx.moveTo(sx, sy);
+    for (let i = 1; i < s.lats.length; i++) {
+        const [x, y] = toCanvas(s.lats[i], s.lons[i]);
+        ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = 'rgba(59, 130, 246, 0.1)';
+    ctx.lineWidth = shadowW;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // Draw speed-colored segments — every single point
+    ctx.lineCap = 'round';
+    ctx.lineWidth = lineW;
+    for (let i = 1; i < s.lats.length; i++) {
+        const [x1, y1] = toCanvas(s.lats[i - 1], s.lons[i - 1]);
+        const [x2, y2] = toCanvas(s.lats[i], s.lons[i]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = s.colors[i];
+        ctx.stroke();
+    }
+
+    // Start/finish markers
+    const markerSize = Math.max(4, 6 / s.zoom);
+    const [startX, startY] = toCanvas(s.lats[0], s.lons[0]);
+    const [endX, endY] = toCanvas(s.lats[s.lats.length - 1], s.lons[s.lats.length - 1]);
+
+    ctx.beginPath();
+    ctx.arc(startX, startY, markerSize, 0, Math.PI * 2);
+    ctx.fillStyle = '#22c55e';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(endX, endY, markerSize, 0, Math.PI * 2);
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.fillStyle = '#22c55e';
+    ctx.fillText('Start', startX + markerSize + 4, startY + 4);
+    ctx.fillStyle = '#ef4444';
+    ctx.fillText('Finish', endX + markerSize + 4, endY + 4);
+}
+
+function setupTrackInteraction(canvas) {
+    const s = trackState;
+
+    // Mouse wheel zoom (toward cursor)
+    canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        const oldZoom = s.zoom;
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        s.zoom = Math.max(0.5, Math.min(50, s.zoom * factor));
+
+        // Zoom toward mouse position
+        const zoomRatio = s.zoom / oldZoom;
+        const cx = rect.width / 2;
+        const cy = rect.height / 2;
+        s.panX = mx - zoomRatio * (mx - s.panX - cx) - cx + (zoomRatio - 1) * s.panX;
+        s.panY = my - zoomRatio * (my - s.panY - cy) - cy + (zoomRatio - 1) * s.panY;
+
+        // Simpler: just scale pan from cursor
+        s.panX = mx - zoomRatio * (mx - s.panX);
+        s.panY = my - zoomRatio * (my - s.panY);
+
+        drawTrack(canvas);
+    }, { passive: false });
+
+    // Drag to pan
+    canvas.addEventListener('mousedown', (e) => {
+        s.dragging = true;
+        s.lastMouse = { x: e.clientX, y: e.clientY };
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!s.dragging || !s.lastMouse) return;
+        s.panX += e.clientX - s.lastMouse.x;
+        s.panY += e.clientY - s.lastMouse.y;
+        s.lastMouse = { x: e.clientX, y: e.clientY };
+        drawTrack(canvas);
+    });
+
+    window.addEventListener('mouseup', () => {
+        s.dragging = false;
+        s.lastMouse = null;
+    });
+
+    // Buttons
+    document.getElementById('zoom-in').addEventListener('click', () => {
+        s.zoom = Math.min(50, s.zoom * 1.4);
+        drawTrack(canvas);
+    });
+    document.getElementById('zoom-out').addEventListener('click', () => {
+        s.zoom = Math.max(0.5, s.zoom / 1.4);
+        drawTrack(canvas);
+    });
+    document.getElementById('zoom-reset').addEventListener('click', () => {
+        s.zoom = 1;
+        s.panX = 0;
+        s.panY = 0;
+        drawTrack(canvas);
+    });
+
+    // Resize
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => drawTrack(canvas), 150);
+    });
+}
+
+function speedColor(spd, minSpeed, maxSpeed) {
+    if (spd == null || maxSpeed === minSpeed) return '#3b82f6';
+    const t = Math.max(0, Math.min(1, (spd - minSpeed) / (maxSpeed - minSpeed)));
+    if (t < 0.33) {
+        return lerpColor('#3b82f6', '#22c55e', t / 0.33);
+    } else if (t < 0.66) {
+        return lerpColor('#22c55e', '#eab308', (t - 0.33) / 0.33);
+    } else {
+        return lerpColor('#eab308', '#ef4444', (t - 0.66) / 0.34);
+    }
+}
+
+function lerpColor(a, b, t) {
+    const parse = c => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
+    const [r1, g1, b1] = parse(a);
+    const [r2, g2, b2] = parse(b);
+    const r = Math.round(r1 + (r2 - r1) * t);
+    const g = Math.round(g1 + (g2 - g1) * t);
+    const bl = Math.round(b1 + (b2 - b1) * t);
+    return `rgb(${r},${g},${bl})`;
+}
+
+// ── Charts ───────────────────────────────────────────────────────────────
+
+function createCharts(parsed) {
+    const grid = document.getElementById('charts-grid');
+    grid.innerHTML = '';
+
+    const elapsed = parsed.data.map(r => r.elapsed_time);
+
+    for (const col of parsed.columns) {
+        if (SKIP_COLUMNS.has(col)) continue;
+        if (col === 'latitude' || col === 'longitude' || col === 'elapsed_time') continue;
+
+        const values = parsed.data.map(r => r[col]);
+        const nonNull = values.filter(v => v != null);
+        if (nonNull.length === 0) continue;
+
+        // Skip columns that are entirely constant and boring
+        const uniqueVals = new Set(nonNull);
+        if (uniqueVals.size === 1 && nonNull.length > 10) continue;
+
+        const colIdx = parsed.columns.indexOf(col);
+        const unit = (parsed.units[colIdx] || '').trim();
+        const source = (parsed.sources[colIdx] || '').trim();
+
+        const displayName = col.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const color = CHANNEL_COLORS[col.replace(/_(gps|calc|canbus)(_\d+)?$/, '')] || DEFAULT_COLOR;
+
+        const card = document.createElement('div');
+        card.className = 'chart-card';
+
+        const minVal = Math.min(...nonNull);
+        const maxVal = Math.max(...nonNull);
+        const avgVal = nonNull.reduce((a, b) => a + b, 0) / nonNull.length;
+
+        card.innerHTML = `
+            <h3>${displayName} ${unit ? '(' + unit + ')' : ''} ${source ? '<span style="color:#555;font-weight:normal;font-size:0.8rem">— ' + source + '</span>' : ''}</h3>
+            <div class="chart-wrap"><canvas></canvas></div>
+            <div class="stats-row">
+                <span>Min: <span class="val">${formatNum(minVal)}</span></span>
+                <span>Max: <span class="val">${formatNum(maxVal)}</span></span>
+                <span>Avg: <span class="val">${formatNum(avgVal)}</span></span>
+            </div>
+        `;
+        grid.appendChild(card);
+
+        const canvas = card.querySelector('canvas');
+
+        // Downsample data for performance if too many points
+        const maxPoints = 2000;
+        let chartElapsed = elapsed;
+        let chartValues = values;
+        if (elapsed.length > maxPoints) {
+            const step = Math.ceil(elapsed.length / maxPoints);
+            chartElapsed = [];
+            chartValues = [];
+            for (let i = 0; i < elapsed.length; i += step) {
+                chartElapsed.push(elapsed[i]);
+                chartValues.push(values[i]);
+            }
+        }
+
+        new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: chartElapsed,
+                datasets: [{
+                    label: displayName,
+                    data: chartValues,
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    fill: true,
+                    tension: 0.1,
+                    spanGaps: true,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                interaction: {
+                    mode: 'index',
+                    intersect: false,
+                },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: 'rgba(15,17,23,0.95)',
+                        borderColor: '#2a2d35',
+                        borderWidth: 1,
+                        titleColor: '#999',
+                        bodyColor: '#fff',
+                        callbacks: {
+                            title: (items) => items[0] ? `Elapsed: ${formatNum(items[0].parsed.x)}s` : '',
+                            label: (item) => `${displayName}: ${item.parsed.y != null ? formatNum(item.parsed.y) : '—'} ${unit}`,
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        type: 'linear',
+                        title: {
+                            display: true,
+                            text: 'Elapsed Time (s)',
+                            color: '#666',
+                        },
+                        ticks: { color: '#555', maxTicksLimit: 10 },
+                        grid: { color: '#1e2028' },
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: unit || '',
+                            color: '#666',
+                        },
+                        ticks: { color: '#555' },
+                        grid: { color: '#1e2028' },
+                    }
+                }
+            }
+        });
+    }
+}
+
+function formatNum(n) {
+    if (n == null) return '—';
+    return Number(n.toFixed(2)).toString();
+}
+
+// ── Session metadata ─────────────────────────────────────────────────────
+
+function renderMeta(parsed) {
+    const m = parsed.meta;
+    const title = m.session_title || m.track_name || 'Session';
+    document.getElementById('session-title').textContent = title;
+
+    const metaDiv = document.getElementById('session-meta');
+    const items = [];
+    if (m.track_name) items.push(['Track', m.track_name]);
+    if (m.session_type) items.push(['Type', m.session_type]);
+    if (m.created) items.push(['Date', m.created]);
+    if (m.note) items.push(['Note', m.note]);
+
+    const totalRows = parsed.data.length;
+    const elapsed0 = parsed.data[0]?.elapsed_time;
+    const elapsedN = parsed.data[totalRows - 1]?.elapsed_time;
+    if (elapsed0 != null && elapsedN != null) {
+        const dur = elapsedN - elapsed0;
+        const mins = Math.floor(dur / 60);
+        const secs = (dur % 60).toFixed(1);
+        items.push(['Duration', `${mins}m ${secs}s`]);
+    }
+    items.push(['Data Points', totalRows.toLocaleString()]);
+
+    metaDiv.innerHTML = items.map(([label, val]) =>
+        `<span><span class="label">${label}:</span> ${val}</span>`
+    ).join('');
+}
+
+// ── Drag & Drop ──────────────────────────────────────────────────────────
+
+const dropZone = document.getElementById('drop-zone');
+const dashboard = document.getElementById('dashboard');
+
+dropZone.addEventListener('dragover', e => {
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+});
+
+dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('dragover');
+});
+
+dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+});
+
+dropZone.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.csv';
+    input.onchange = () => {
+        if (input.files[0]) handleFile(input.files[0]);
+    };
+    input.click();
+});
+
+function handleFile(file) {
+    if (!file.name.endsWith('.csv')) {
+        alert('Please drop a CSV file.');
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const text = e.target.result;
+        const parsed = parseCSV(text);
+
+        if (parsed.data.length === 0) {
+            alert('No data rows found in CSV.');
+            return;
+        }
+
+        dropZone.style.display = 'none';
+        dashboard.classList.add('visible');
+
+        renderMeta(parsed);
+        initTrack(document.getElementById('track-canvas'), parsed.data);
+        createCharts(parsed);
+    };
+    reader.readAsText(file);
+}
+</script>
+</body>
+</html>
