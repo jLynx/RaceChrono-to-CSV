@@ -362,8 +362,9 @@ def convert_rcz_to_motec(rcz_path, output_path=None, driver="", vehicle_id="",
 
         # Step 8: Write .ldx file with lap markers
         laps = session_info.get('laps', [])
-        if laps:
-            write_ldx(str(ldx_path), laps)
+        if laps and decoder.gps_timestamps is not None:
+            data_start_ms = decoder.gps_timestamps[0] * 1000
+            write_ldx(str(ldx_path), laps, data_start_ms)
         else:
             print("No lap data found, skipping .ldx file")
 

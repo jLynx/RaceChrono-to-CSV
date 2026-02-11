@@ -8,29 +8,37 @@ for use with MoTeC i2 analysis software.
 from xml.dom import minidom
 
 
-def write_ldx(filename, laps):
+def write_ldx(filename, laps, data_start_ms):
     """Write a MoTeC .ldx file with lap beacon markers.
 
     Args:
         filename: Output .ldx file path
         laps: List of dicts from session.json 'laps' array.
               Each lap has 'startTimestamp' and 'finishTimestamp' (ms).
+        data_start_ms: Start timestamp of the data in the .ld file (ms),
+                       i.e. the first GPS timestamp. Beacons are placed
+                       relative to this time.
     """
     if not laps or len(laps) < 1:
         return
 
-    # Compute lap times from start/finish timestamps
-    lap_times = []
-    first_start_ms = laps[0].get('startTimestamp', 0)
-
+    # Compute beacon times as elapsed from data start
+    # Each beacon marks a lap finish (= start/finish line crossing)
+    # Skip laps that finish before data starts (fragment files)
+    beacon_times_sec = []
+    lap_durations = []
     for lap in laps:
-        start_ms = lap.get('startTimestamp', 0)
         finish_ms = lap.get('finishTimestamp', None)
+        start_ms = lap.get('startTimestamp', 0)
         if finish_ms is not None:
-            lap_time_sec = (finish_ms - start_ms) / 1000.0
-            lap_times.append(lap_time_sec)
+            elapsed_sec = (finish_ms - data_start_ms) / 1000.0
+            if elapsed_sec < 0:
+                continue  # lap finished before this data starts
+            lap_duration = (finish_ms - start_ms) / 1000.0
+            beacon_times_sec.append(elapsed_sec)
+            lap_durations.append(lap_duration)
 
-    if not lap_times:
+    if not beacon_times_sec:
         return
 
     # Build XML
@@ -54,12 +62,11 @@ def write_ldx(filename, laps):
     markergroup = root.createElement("MarkerGroup")
     markerblock.appendChild(markergroup)
     markergroup.setAttribute("Name", "Beacons")
-    markergroup.setAttribute("Index", str(len(lap_times) - 1))
+    markergroup.setAttribute("Index", str(len(beacon_times_sec) - 1))
 
-    # Create beacon markers at cumulative elapsed times
-    elapsed_us = 0.0
-    for idx, lap_time in enumerate(lap_times):
-        elapsed_us += lap_time * 1_000_000  # microseconds
+    # Create beacon markers at elapsed times from data start
+    for idx, elapsed_sec in enumerate(beacon_times_sec):
+        elapsed_us = elapsed_sec * 1_000_000  # microseconds
         marker = root.createElement("Marker")
         marker.setAttribute("Version", "100")
         marker.setAttribute("ClassName", "BCN")
@@ -75,16 +82,16 @@ def write_ldx(filename, laps):
     total_laps = root.createElement("String")
     details.appendChild(total_laps)
     total_laps.setAttribute("Id", "Total Laps")
-    total_laps.setAttribute("Value", str(len(lap_times) + 1))  # include in-lap
+    total_laps.setAttribute("Value", str(len(beacon_times_sec) + 1))  # include in-lap
 
     # Find fastest lap (skip outlap = first lap)
-    if len(lap_times) > 1:
-        search_laps = lap_times[1:]  # skip outlap
+    if len(lap_durations) > 1:
+        search_laps = lap_durations[1:]  # skip outlap
         fastest_idx = min(range(len(search_laps)), key=lambda i: search_laps[i])
         fastest_time = search_laps[fastest_idx]
         fastest_lap_num = fastest_idx + 2  # +1 for outlap, +1 for 1-based
     else:
-        fastest_time = lap_times[0]
+        fastest_time = lap_durations[0]
         fastest_lap_num = 1
 
     minutes = int(fastest_time % 3600 // 60)
@@ -104,4 +111,4 @@ def write_ldx(filename, laps):
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(root.toprettyxml(indent="  "))
 
-    print(f"Wrote MoTeC .ldx file: {filename} ({len(lap_times)} laps)")
+    print(f"Wrote MoTeC .ldx file: {filename} ({len(beacon_times_sec)} laps)")

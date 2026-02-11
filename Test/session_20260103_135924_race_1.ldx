@@ -4,16 +4,16 @@
   <Layer>
    <MarkerBlock>
     <MarkerGroup Name="Beacons" Index="9">
-     <Marker Version="100" ClassName="BCN" Name="Manual.1" Flags="77" Time="1.14911000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.2" Flags="77" Time="2.23284000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.3" Flags="77" Time="3.31967000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.4" Flags="77" Time="4.39492000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.5" Flags="77" Time="5.47278000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.6" Flags="77" Time="6.55200000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.7" Flags="77" Time="7.63607000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.8" Flags="77" Time="8.71607000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.9" Flags="77" Time="9.80094000000000000e+08"/>
-     <Marker Version="100" ClassName="BCN" Name="Manual.10" Flags="77" Time="1.08837200000000000e+09"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.1" Flags="77" Time="6.22429000000000000e+08"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.2" Flags="77" Time="7.30802000000000000e+08"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.3" Flags="77" Time="8.39485000000000000e+08"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.4" Flags="77" Time="9.47010000000000000e+08"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.5" Flags="77" Time="1.05479600000000000e+09"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.6" Flags="77" Time="1.16271800000000000e+09"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.7" Flags="77" Time="1.27112500000000000e+09"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.8" Flags="77" Time="1.37912500000000000e+09"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.9" Flags="77" Time="1.48761200000000000e+09"/>
+     <Marker Version="100" ClassName="BCN" Name="Manual.10" Flags="77" Time="1.59589000000000000e+09"/>
     </MarkerGroup>
    </MarkerBlock>
    <RangeBlock/>
