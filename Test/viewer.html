@@ -352,6 +352,100 @@
             font-size: 0.9rem;
             color: #666;
         }
+
+        #motec-export-btn {
+            margin-top: 12px;
+            background: #1e5631;
+            border: 1px solid #2d8044;
+            color: #7ddf94;
+            padding: 8px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+
+        #motec-export-btn:hover {
+            background: #267340;
+            border-color: #3da55b;
+        }
+
+        #motec-modal {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 17, 23, 0.85);
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+
+        .motec-modal-content {
+            background: #181a20;
+            border: 1px solid #2a2d35;
+            border-radius: 12px;
+            padding: 24px;
+            min-width: 360px;
+        }
+
+        .motec-modal-content h3 {
+            color: #fff;
+            margin-bottom: 16px;
+            font-size: 1.1rem;
+        }
+
+        .motec-form label {
+            display: block;
+            color: #999;
+            font-size: 0.85rem;
+            margin-bottom: 10px;
+        }
+
+        .motec-form input {
+            display: block;
+            width: 100%;
+            margin-top: 4px;
+            padding: 8px 12px;
+            background: #12141a;
+            border: 1px solid #2a2d35;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-size: 0.9rem;
+        }
+
+        .motec-modal-buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+            justify-content: flex-end;
+        }
+
+        .motec-modal-buttons button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            border: 1px solid #2a2d35;
+        }
+
+        #motec-download-btn {
+            background: #1e5631;
+            border-color: #2d8044;
+            color: #7ddf94;
+        }
+
+        #motec-download-btn:hover {
+            background: #267340;
+        }
+
+        #motec-cancel-btn {
+            background: #1e2028;
+            color: #ccc;
+        }
+
+        #motec-cancel-btn:hover {
+            background: #2a2d35;
+        }
     </style>
 </head>
 <body>
@@ -365,6 +459,7 @@
     <div class="header">
         <h1 id="session-title"></h1>
         <div class="meta" id="session-meta"></div>
+        <button id="motec-export-btn" style="display:none">Export to MoTeC i2</button>
     </div>
     <div class="lap-panel" id="lap-panel" style="display:none;">
         <h2>Lap Times</h2>
@@ -396,6 +491,20 @@
 <div id="loading">
     <p>Decoding RCZ file...</p>
     <div class="loading-status" id="loading-status"></div>
+</div>
+
+<div id="motec-modal" style="display:none">
+    <div class="motec-modal-content">
+        <h3>Export to MoTeC i2</h3>
+        <div class="motec-form">
+            <label>Driver Name <input type="text" id="motec-driver" placeholder="Optional"></label>
+            <label>Vehicle ID <input type="text" id="motec-vehicle" placeholder="Optional"></label>
+        </div>
+        <div class="motec-modal-buttons">
+            <button id="motec-download-btn">Download .ld + .ldx</button>
+            <button id="motec-cancel-btn">Cancel</button>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -433,6 +542,8 @@ let globalParsed = null;
 let globalLaps = [];
 let selectedLaps = null; // null = show all, otherwise Set of lap numbers
 let chartInstances = [];
+let rczRawData = null;
+let rczFileName = '';
 
 // ── RCZ Decoder ──────────────────────────────────────────────────────────
 
@@ -1284,7 +1395,18 @@ async function decodeRCZ(file) {
         data.push(row);
     }
 
-    return { meta, columns, units, sources, data };
+    return {
+        meta, columns, units, sources, data,
+        _raw: {
+            sessionInfo,
+            channels,
+            gpsTimestamps,
+            gpsNativeRateHz,
+            canbusChannelOrder,
+            canbusChannelUnits,
+            sensorDevices,
+        }
+    };
 }
 
 // ── Lap extraction & rendering ───────────────────────────────────────────
@@ -1922,6 +2044,418 @@ function renderMeta(parsed, fileName) {
     ).join('');
 }
 
+// ── MoTeC Export ─────────────────────────────────────────────────────────
+
+const MOTEC_VEHICLE_PTR = 1762;
+const MOTEC_VENUE_PTR = 5078;
+const MOTEC_EVENT_PTR = 8180;
+const MOTEC_HEADER_PTR = 11336;
+const MOTEC_CHANNEL_HEADER_SIZE = 124;
+
+function motecWriteString(view, offset, str, maxLen) {
+    const bytes = new TextEncoder().encode(str.substring(0, maxLen));
+    for (let i = 0; i < Math.min(bytes.length, maxLen); i++) {
+        view.setUint8(offset + i, bytes[i]);
+    }
+}
+
+function motecDetectFrequency(timestamps) {
+    if (timestamps.length < 2) return 1;
+    const dt = (timestamps[timestamps.length - 1] - timestamps[0]) / (timestamps.length - 1);
+    return dt > 0 ? Math.max(1, Math.round(1.0 / dt)) : 1;
+}
+
+function motecResampleUniform(timestamps, values, freq, method) {
+    if (timestamps.length < 2) {
+        const r = new Float32Array(values.length);
+        for (let i = 0; i < values.length; i++) r[i] = isNaN(values[i]) ? 0 : values[i];
+        return r;
+    }
+    const t0 = timestamps[0];
+    const duration = timestamps[timestamps.length - 1] - t0;
+    const nSamples = Math.max(1, Math.floor(duration * freq) + 1);
+    const result = new Float32Array(nSamples);
+    const dt = 1.0 / freq;
+
+    // Filter valid values
+    const vTs = [], vVals = [];
+    for (let i = 0; i < timestamps.length; i++) {
+        if (!isNaN(values[i])) { vTs.push(timestamps[i]); vVals.push(values[i]); }
+    }
+    if (vTs.length < 2) { result.fill(0); return result; }
+
+    if (method === 'zoh') {
+        for (let i = 0; i < nSamples; i++) {
+            const t = t0 + i * dt;
+            let lo = 0, hi = vTs.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (vTs[mid] <= t) lo = mid + 1; else hi = mid; }
+            result[i] = (lo - 1 >= 0) ? vVals[lo - 1] : 0;
+        }
+    } else {
+        for (let i = 0; i < nSamples; i++) {
+            const t = t0 + i * dt;
+            if (t <= vTs[0]) { result[i] = vVals[0]; continue; }
+            if (t >= vTs[vTs.length - 1]) { result[i] = vVals[vVals.length - 1]; continue; }
+            let lo = 0, hi = vTs.length - 1;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (vTs[mid] < t) lo = mid + 1; else hi = mid; }
+            if (lo === 0) { result[i] = vVals[0]; }
+            else {
+                const frac = (t - vTs[lo - 1]) / (vTs[lo] - vTs[lo - 1]);
+                result[i] = vVals[lo - 1] + frac * (vVals[lo] - vVals[lo - 1]);
+            }
+        }
+    }
+    for (let i = 0; i < nSamples; i++) { if (isNaN(result[i])) result[i] = 0; }
+    return result;
+}
+
+function motecWriteHeader(view, metaPtr, dataPtr, eventPtr, numChannels, dateStr, timeStr, driver, vehicleId, venue, shortComment) {
+    let o = 0;
+    view.setUint32(o, 0x40, true); o += 8;           // ldmarker + 4x pad
+    view.setUint32(o, metaPtr, true); o += 4;         // chann_meta_ptr
+    view.setUint32(o, dataPtr, true); o += 4;         // chann_data_ptr
+    o += 20;                                           // 20x pad
+    view.setUint32(o, eventPtr, true); o += 4;        // event_ptr
+    o += 24;                                           // 24x pad
+    view.setUint16(o, 1, true); o += 2;               // unknown1
+    view.setUint16(o, 0x4240, true); o += 2;          // unknown2
+    view.setUint16(o, 0xf, true); o += 2;             // unknown3
+    view.setUint32(o, 0x1f44, true); o += 4;          // device serial
+    motecWriteString(view, o, "ADL", 8); o += 8;      // device type
+    view.setUint16(o, 420, true); o += 2;             // device version
+    view.setUint16(o, 0xadb0, true); o += 2;          // unknown4
+    view.setUint32(o, numChannels, true); o += 4;     // num_channs
+    o += 4;                                            // 4x pad
+    motecWriteString(view, o, dateStr, 16); o += 32;  // date + 16x pad
+    motecWriteString(view, o, timeStr, 16); o += 32;  // time + 16x pad
+    motecWriteString(view, o, driver, 64); o += 64;   // driver
+    motecWriteString(view, o, vehicleId, 64); o += 64; // vehicleid
+    o += 64;                                           // 64x pad
+    motecWriteString(view, o, venue, 64); o += 64;    // venue
+    o += 64;                                           // 64x pad
+    o += 1024;                                         // 1024x pad
+    view.setUint32(o, 0xc81a4, true); o += 4;         // pro logging magic
+    o += 66;                                           // 66x pad
+    motecWriteString(view, o, shortComment, 64); o += 64; // short comment
+    // 126x pad → total 1762
+}
+
+function motecWriteEvent(view, base, name, session, comment, venuePtr) {
+    motecWriteString(view, base, name, 64);
+    motecWriteString(view, base + 64, session, 64);
+    motecWriteString(view, base + 128, comment, 1024);
+    view.setUint16(base + 1152, venuePtr, true);
+}
+
+function motecWriteVenue(view, base, name, vehiclePtr) {
+    motecWriteString(view, base, name, 64);
+    // 1034x padding (zeros from ArrayBuffer init)
+    view.setUint16(base + 1098, vehiclePtr, true);
+}
+
+function motecWriteVehicle(view, base, id, weight, type, comment) {
+    motecWriteString(view, base, id, 64);
+    // 128x padding
+    view.setUint32(base + 192, weight, true);
+    motecWriteString(view, base + 196, type, 32);
+    motecWriteString(view, base + 228, comment, 32);
+}
+
+function motecWriteChannel(view, base, prevPtr, nextPtr, dataPtr, dataLen, idx, freq, name, shortName, unit) {
+    let o = base;
+    view.setUint32(o, prevPtr, true); o += 4;
+    view.setUint32(o, nextPtr, true); o += 4;
+    view.setUint32(o, dataPtr, true); o += 4;
+    view.setUint32(o, dataLen, true); o += 4;
+    view.setUint16(o, 0x2ee1 + idx, true); o += 2;   // counter
+    view.setUint16(o, 0x07, true); o += 2;            // dtype_a (float)
+    view.setUint16(o, 4, true); o += 2;               // dtype size (float32)
+    view.setUint16(o, freq, true); o += 2;             // frequency
+    view.setInt16(o, 0, true); o += 2;                 // shift
+    view.setInt16(o, 1, true); o += 2;                 // mul
+    view.setInt16(o, 1, true); o += 2;                 // scale
+    view.setInt16(o, 0, true); o += 2;                 // dec_places
+    motecWriteString(view, o, name, 32); o += 32;      // name
+    motecWriteString(view, o, shortName, 8); o += 8;   // short name
+    motecWriteString(view, o, unit, 12); o += 12;      // unit
+    // 40x padding → total 124
+}
+
+function motecBuildLdx(sessionInfo, dataStartMs) {
+    const laps = sessionInfo.laps || [];
+    if (!laps || laps.length < 1) return null;
+
+    const beaconTimes = [];
+    const lapDurations = [];
+    for (const lap of laps) {
+        const finishMs = lap.finishTimestamp;
+        const startMs = lap.startTimestamp || 0;
+        if (finishMs != null) {
+            const elapsedSec = (finishMs - dataStartMs) / 1000.0;
+            if (elapsedSec < 0) continue;
+            beaconTimes.push(elapsedSec);
+            lapDurations.push((finishMs - startMs) / 1000.0);
+        }
+    }
+    if (beaconTimes.length === 0) return null;
+
+    let xml = '<?xml version="1.0" ?>\n';
+    xml += '<LDXFile locale="English_United Kingdom.1252" DefaultLocale="C" Version="1.6">\n';
+    xml += '  <Layers>\n';
+    xml += '    <Layer>\n';
+    xml += '      <MarkerBlock>\n';
+    xml += `        <MarkerGroup Name="Beacons" Index="${beaconTimes.length - 1}">\n`;
+    for (let i = 0; i < beaconTimes.length; i++) {
+        const timeUs = beaconTimes[i] * 1000000;
+        xml += `          <Marker Version="100" ClassName="BCN" Name="Manual.${i + 1}" Flags="77" Time="${timeUs.toFixed(2)}"/>\n`;
+    }
+    xml += '        </MarkerGroup>\n';
+    xml += '      </MarkerBlock>\n';
+    xml += '    </Layer>\n';
+    xml += '    <Details>\n';
+    xml += `      <String Id="Total Laps" Value="${beaconTimes.length + 1}"/>\n`;
+
+    let fastestTime, fastestLapNum;
+    if (lapDurations.length > 1) {
+        const search = lapDurations.slice(1);
+        let minIdx = 0;
+        for (let i = 1; i < search.length; i++) { if (search[i] < search[minIdx]) minIdx = i; }
+        fastestTime = search[minIdx];
+        fastestLapNum = minIdx + 2;
+    } else {
+        fastestTime = lapDurations[0];
+        fastestLapNum = 1;
+    }
+    const mins = Math.floor(fastestTime % 3600 / 60);
+    const secs = fastestTime % 3600 % 60;
+    xml += `      <String Id="Fastest Time" Value="${String(mins).padStart(2, '0')}:${secs.toFixed(3).padStart(6, '0')}"/>\n`;
+    xml += `      <String Id="Fastest Lap" Value="${fastestLapNum}"/>\n`;
+    xml += '    </Details>\n';
+    xml += '  </Layers>\n';
+    xml += '</LDXFile>\n';
+    return xml;
+}
+
+function motecExport(rawData, options) {
+    const { driver = '', vehicleId = '' } = options || {};
+    const sessionInfo = rawData.sessionInfo;
+    const channels = rawData.channels;
+    const gpsTimestamps = rawData.gpsTimestamps;
+    const gpsFreq = rawData.gpsNativeRateHz;
+
+    // Auto-populate metadata
+    const venueName = sessionInfo.trackName || sessionInfo.firstPositionReverseGeocoding || '';
+    const eventName = sessionInfo.title || venueName;
+    const eventSession = sessionInfo.title || '';
+
+    let shortComment = '';
+    const lapCount = sessionInfo.lapCount || 0;
+    const bestLapMs = sessionInfo.bestLaptime || 0;
+    if (lapCount > 0 && bestLapMs > 0 && bestLapMs < 3600000) {
+        const bMin = Math.floor(bestLapMs / 60000);
+        const bSec = (bestLapMs % 60000) / 1000;
+        shortComment = `${lapCount} laps, best ${bMin}:${bSec.toFixed(3).padStart(6, '0')}`;
+    } else if (lapCount > 0) {
+        shortComment = `${lapCount} laps`;
+    }
+
+    let longComment = '';
+    const parts = [];
+    if (sessionInfo.description) parts.push(sessionInfo.description);
+    const durSec = (sessionInfo.lengthTime || 0) / 1000;
+    if (durSec > 0) parts.push(`Duration: ${Math.floor(durSec / 60)}m ${Math.floor(durSec % 60)}s`);
+    const distM = (sessionInfo.lengthDistance || 0) / 1000;
+    if (distM > 0) parts.push(`Distance: ${(distM / 1000).toFixed(1)} km`);
+    longComment = parts.join('. ');
+
+    // Session datetime
+    const createdTs = (sessionInfo.timeCreated || sessionInfo.firstTimestamp || Date.now()) / 1000;
+    const d = new Date(createdTs * 1000);
+    const dateStr = `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
+    const timeStr = `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}:${String(d.getUTCSeconds()).padStart(2, '0')}`;
+
+    // Collect channels
+    const channelList = [];
+
+    const GPS_NAMES = {
+        latitude: ['GPS Latitude', 'deg'], longitude: ['GPS Longitude', 'deg'],
+        speed: ['GPS Speed', 'm/s'], altitude: ['GPS Altitude', 'm'],
+        bearing: ['GPS Bearing', 'deg'], distance_traveled: ['GPS Distance', 'm'],
+        accuracy: ['GPS Accuracy', 'm'], satellites: ['GPS Satellites', ''],
+        fix_type: ['GPS Fix Type', ''], device_battery_level: ['GPS Battery', '%'],
+    };
+
+    const SENSOR_NAMES = {
+        x_acc: ['X Acc', 'G'], y_acc: ['Y Acc', 'G'], z_acc: ['Z Acc', 'G'],
+        x_rate_of_rotation: ['X Gyro', 'deg/s'], y_rate_of_rotation: ['Y Gyro', 'deg/s'], z_rate_of_rotation: ['Z Gyro', 'deg/s'],
+        x_magnetic_field: ['X Mag', 'uT'], y_magnetic_field: ['Y Mag', 'uT'], z_magnetic_field: ['Z Mag', 'uT'],
+    };
+
+    // GPS channels
+    if (gpsTimestamps && gpsTimestamps.length > 1) {
+        for (const [rawName, [motecName, unit]] of Object.entries(GPS_NAMES)) {
+            if (!channels[rawName]) continue;
+            const ch = channels[rawName];
+            const data = motecResampleUniform(ch.timestamps, ch.values, gpsFreq, rawName === 'bearing' ? 'zoh' : 'linear');
+            channelList.push({ name: motecName, unit, data, freq: gpsFreq });
+        }
+    }
+
+    // CAN channels
+    for (const canName of rawData.canbusChannelOrder) {
+        const key = `canbus_${canName}`;
+        if (!channels[key]) continue;
+        const ch = channels[key];
+        const freq = motecDetectFrequency(ch.timestamps);
+        const data = motecResampleUniform(ch.timestamps, ch.values, freq, 'linear');
+        const motecName = canName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        channelList.push({ name: motecName, unit: rawData.canbusChannelUnits[canName] || '', data, freq });
+    }
+
+    // Sensor channels
+    const typeCounts = {};
+    for (const s of rawData.sensorDevices) typeCounts[s.devType] = (typeCounts[s.devType] || 0) + 1;
+
+    for (const sensor of rawData.sensorDevices) {
+        const freq = motecDetectFrequency(sensor.timestamps);
+        const suffix = (typeCounts[sensor.devType] || 1) > 1 ? ` ${sensor.devId}` : '';
+        for (const colName of sensor.columns) {
+            const dataKey = `sensor_${sensor.devId}_${colName}`;
+            if (!channels[dataKey]) continue;
+            const ch = channels[dataKey];
+            let motecName, unit;
+            if (SENSOR_NAMES[colName]) { [motecName, unit] = SENSOR_NAMES[colName]; }
+            else { motecName = colName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()); unit = ch.unit; }
+            const data = motecResampleUniform(ch.timestamps, ch.values, freq, 'linear');
+            channelList.push({ name: motecName + suffix, unit, data, freq });
+        }
+    }
+
+    // Calculated fields
+    if (channels.speed && gpsTimestamps && gpsTimestamps.length > 1) {
+        const rawSpeed = channels.speed.values;
+        const rawTs = channels.speed.timestamps;
+        const nGps = rawTs.length;
+        const N = 3;
+
+        const rawLongAcc = new Float64Array(nGps).fill(NaN);
+        for (let i = N; i < nGps - N; i++) {
+            const dt = rawTs[i + N] - rawTs[i - N];
+            if (dt > 0 && !isNaN(rawSpeed[i + N]) && !isNaN(rawSpeed[i - N]))
+                rawLongAcc[i] = (rawSpeed[i + N] - rawSpeed[i - N]) / dt / 9.81;
+        }
+        for (let i = 1; i < Math.min(N, nGps - 1); i++) {
+            const dt = rawTs[i + 1] - rawTs[i - 1];
+            if (dt > 0 && !isNaN(rawSpeed[i + 1]) && !isNaN(rawSpeed[i - 1]))
+                rawLongAcc[i] = (rawSpeed[i + 1] - rawSpeed[i - 1]) / dt / 9.81;
+        }
+        for (let i = Math.max(nGps - N, 1); i < nGps - 1; i++) {
+            const ip = Math.min(i + 1, nGps - 1), im = Math.max(i - 1, 0);
+            const dt = rawTs[ip] - rawTs[im];
+            if (dt > 0) rawLongAcc[i] = (rawSpeed[ip] - rawSpeed[im]) / dt / 9.81;
+        }
+        const longData = motecResampleUniform(rawTs, rawLongAcc, gpsFreq, 'linear');
+        channelList.push({ name: 'Longitudinal Acc', unit: 'G', data: longData, freq: gpsFreq });
+
+        const rawLatAcc = new Float64Array(nGps).fill(NaN);
+        if (channels.bearing) {
+            const rawBearing = channels.bearing.values;
+            for (let i = N; i < nGps - N; i++) {
+                const dt = rawTs[i + N] - rawTs[i - N];
+                if (dt > 0 && !isNaN(rawBearing[i + N]) && !isNaN(rawBearing[i - N])) {
+                    let db = rawBearing[i + N] - rawBearing[i - N];
+                    if (db > 180) db -= 360; else if (db < -180) db += 360;
+                    const yawRate = (db * Math.PI / 180) / dt;
+                    rawLatAcc[i] = -(isNaN(rawSpeed[i]) ? 0 : rawSpeed[i]) * yawRate / 9.81;
+                }
+            }
+        }
+        const latData = motecResampleUniform(rawTs, rawLatAcc, gpsFreq, 'linear');
+        channelList.push({ name: 'Lateral Acc', unit: 'G', data: latData, freq: gpsFreq });
+
+        const combinedData = new Float32Array(longData.length);
+        for (let i = 0; i < longData.length; i++)
+            combinedData[i] = Math.sqrt(longData[i] ** 2 + latData[i] ** 2);
+        channelList.push({ name: 'Combined Acc', unit: 'G', data: combinedData, freq: gpsFreq });
+
+        const leanData = new Float32Array(latData.length);
+        for (let i = 0; i < latData.length; i++)
+            leanData[i] = Math.atan(-latData[i]) * (180 / Math.PI);
+        channelList.push({ name: 'Lean Angle', unit: 'deg', data: leanData, freq: gpsFreq });
+    }
+
+    if (channelList.length === 0) return { ld: null, ldx: null };
+
+    // Build binary .ld file
+    const numCh = channelList.length;
+    const metaSize = numCh * MOTEC_CHANNEL_HEADER_SIZE;
+    const dataStart = MOTEC_HEADER_PTR + metaSize;
+    let totalDataBytes = 0;
+    for (const ch of channelList) totalDataBytes += ch.data.length * 4;
+
+    const buffer = new ArrayBuffer(dataStart + totalDataBytes);
+    const view = new DataView(buffer);
+
+    motecWriteHeader(view, MOTEC_HEADER_PTR, dataStart, MOTEC_EVENT_PTR, numCh,
+        dateStr, timeStr, driver, vehicleId, venueName, shortComment);
+    motecWriteEvent(view, MOTEC_EVENT_PTR, eventName, eventSession, longComment, MOTEC_VENUE_PTR);
+    motecWriteVenue(view, MOTEC_VENUE_PTR, venueName, MOTEC_VEHICLE_PTR);
+    motecWriteVehicle(view, MOTEC_VEHICLE_PTR, vehicleId, 0, '', '');
+
+    // Write channel metadata and data
+    let curDataOffset = dataStart;
+    for (let i = 0; i < numCh; i++) {
+        const ch = channelList[i];
+        const metaOffset = MOTEC_HEADER_PTR + i * MOTEC_CHANNEL_HEADER_SIZE;
+        const prevPtr = i > 0 ? MOTEC_HEADER_PTR + (i - 1) * MOTEC_CHANNEL_HEADER_SIZE : 0;
+        const nextPtr = i < numCh - 1 ? MOTEC_HEADER_PTR + (i + 1) * MOTEC_CHANNEL_HEADER_SIZE : 0;
+
+        motecWriteChannel(view, metaOffset, prevPtr, nextPtr, curDataOffset, ch.data.length,
+            i, ch.freq, ch.name, '', ch.unit);
+
+        // Write float32 data
+        const f32 = new Float32Array(buffer, curDataOffset, ch.data.length);
+        for (let j = 0; j < ch.data.length; j++) f32[j] = isNaN(ch.data[j]) ? 0 : ch.data[j];
+        curDataOffset += ch.data.length * 4;
+    }
+
+    // Build LDX
+    const ldx = (gpsTimestamps && gpsTimestamps.length > 0)
+        ? motecBuildLdx(sessionInfo, gpsTimestamps[0] * 1000)
+        : null;
+
+    return { ld: buffer, ldx };
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function handleMotecExport() {
+    if (!rczRawData) return;
+    const driver = document.getElementById('motec-driver').value || '';
+    const vehicleId = document.getElementById('motec-vehicle').value || '';
+    const result = motecExport(rczRawData, { driver, vehicleId });
+
+    if (result.ld) {
+        const baseName = rczFileName.replace(/\.[^.]+$/, '');
+        downloadBlob(new Blob([result.ld]), baseName + '.ld');
+        if (result.ldx) {
+            setTimeout(() => {
+                downloadBlob(new Blob([result.ldx], { type: 'text/xml' }), baseName + '.ldx');
+            }, 200);
+        }
+    }
+    document.getElementById('motec-modal').style.display = 'none';
+}
+
 // ── Drag & Drop ──────────────────────────────────────────────────────────
 
 const dropZone = document.getElementById('drop-zone');
@@ -1965,6 +2499,15 @@ function showParsed(parsed, fileName) {
     globalParsed = parsed;
     selectedLaps = null;
 
+    // Enable MoTeC export if raw RCZ data is available
+    if (parsed._raw) {
+        rczRawData = parsed._raw;
+        document.getElementById('motec-export-btn').style.display = '';
+    } else {
+        rczRawData = null;
+        document.getElementById('motec-export-btn').style.display = 'none';
+    }
+
     globalLaps = extractLaps(parsed);
     renderLapPanel(globalLaps);
 
@@ -1974,6 +2517,7 @@ function showParsed(parsed, fileName) {
 }
 
 function handleFile(file) {
+    rczFileName = file.name;
     const ext = file.name.split('.').pop().toLowerCase();
 
     if (ext === 'rcz') {
@@ -2000,6 +2544,24 @@ function handleFile(file) {
         alert('Please drop a CSV or RCZ file.');
     }
 }
+
+// ── MoTeC Modal Events ──────────────────────────────────────────────────
+
+document.getElementById('motec-export-btn').addEventListener('click', () => {
+    document.getElementById('motec-modal').style.display = 'flex';
+});
+
+document.getElementById('motec-download-btn').addEventListener('click', handleMotecExport);
+
+document.getElementById('motec-cancel-btn').addEventListener('click', () => {
+    document.getElementById('motec-modal').style.display = 'none';
+});
+
+document.getElementById('motec-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) {
+        document.getElementById('motec-modal').style.display = 'none';
+    }
+});
 </script>
 </body>
 </html>
