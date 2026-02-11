@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RaceChrono Lap Viewer</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -329,13 +330,35 @@
         @media (max-width: 800px) {
             .charts-grid { grid-template-columns: 1fr; }
         }
+
+        #loading {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(15, 17, 23, 0.9);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        #loading p {
+            font-size: 1.3rem;
+            color: #4a9eff;
+        }
+
+        #loading .loading-status {
+            font-size: 0.9rem;
+            color: #666;
+        }
     </style>
 </head>
 <body>
 
 <div id="drop-zone">
     <h1>RaceChrono Lap Viewer</h1>
-    <p>Drag &amp; drop a RaceChrono CSV file here</p>
+    <p>Drag &amp; drop a RaceChrono CSV or RCZ file here</p>
 </div>
 
 <div id="dashboard">
@@ -369,6 +392,11 @@
 </div>
 
 <div id="hover-info"></div>
+
+<div id="loading">
+    <p>Decoding RCZ file...</p>
+    <div class="loading-status" id="loading-status"></div>
+</div>
 
 <script>
 const SKIP_COLUMNS = new Set([
@@ -405,6 +433,859 @@ let globalParsed = null;
 let globalLaps = [];
 let selectedLaps = null; // null = show all, otherwise Set of lap numbers
 let chartInstances = [];
+
+// ── RCZ Decoder ──────────────────────────────────────────────────────────
+
+// Complete channel ID → CamelCase name mapping (from channel_ids.py CHANNEL_NAMES)
+const RCZ_CHANNEL_NAMES = {
+    // General channels
+    0: 'Unknown', 1: 'Timestamp', 2: 'DistanceTraveled', 3: 'PositionLatLong',
+    4: 'Speed', 5: 'Altitude', 6: 'Bearing',
+    7: 'AccelerationLateral', 8: 'AccelerationLongitudinal',
+    9: 'AccelerationX', 10: 'AccelerationY', 11: 'AccelerationZ',
+    12: 'RateOfRotationX', 13: 'RateOfRotationY', 14: 'RateOfRotationZ',
+    15: 'UpdateRate', 16: 'VerticalSpeed',
+    17: 'DeviceBatteryTimeToEmpty', 18: 'DeviceMediaCapacity', 19: 'DeviceMediaFreeSpace',
+    20: 'ElapsedTime',
+    24: 'RotationVectorX', 25: 'RotationVectorY', 26: 'RotationVectorZ', 27: 'RotationVectorScalar',
+    28: 'MagneticFieldX', 29: 'MagneticFieldY', 30: 'MagneticFieldZ',
+    37: 'LeanAngle', 38: 'PitchAngle', 39: 'YawAngle',
+    41: 'HeartRate', 43: 'AccelerationCombined',
+    44: 'Latitude', 45: 'Longitude',
+    46: 'DeviceBatteryLevel', 47: 'DeviceBatteryVoltage',
+    48: 'RollAngle', 49: 'RollRate', 50: 'PitchRate', 51: 'YawRate',
+    52: 'RotationX', 53: 'RotationY', 54: 'RotationZ',
+    55: 'DriftAngle',
+    // Common channels between OBD and data logger (1000-2000)
+    1001: 'SteeringAngle', 1002: 'BrakePedalPosition', 1003: 'ClutchPedalPosition',
+    1004: 'Gear', 1005: 'GearboxTemperature', 1006: 'ClutchTemperature',
+    1007: 'EngineOilPressure', 1008: 'EngineOilLevel',
+    1009: 'BrakeTemperature', 1010: 'Odometer', 1011: 'EngineCoolantPressure',
+    1012: 'ThrottleAngle', 1013: 'TyreTemperature', 1014: 'TyrePressure',
+    1015: 'WheelSpeed', 1016: 'WheelSpeedFrequency', 1017: 'SuspensionTravel',
+    1019: 'EmergencyBrakePosition', 1020: 'FuelLevelVolume',
+    1021: 'EngineCoolantLevel', 1022: 'EngineCoolantLevelVolume',
+    1023: 'AirFuelRatio', 1024: 'EngineOilLevelVolume',
+    1025: 'EngineKnockCorrection', 1026: 'EngineWastegateDutyCycle',
+    1027: 'EnginePower', 1028: 'EngineCurrent', 1029: 'EngineTorque',
+    1030: 'InverterPower', 1031: 'BatteryLevelEnergy', 1032: 'BatteryCurrent',
+    1033: 'BrakePressure', 1034: 'StateOfCharge', 1035: 'TyreSlip',
+    1036: 'BrakeTemperaturePercent', 1037: 'BatteryTemperature',
+    1038: 'BatteryTemperaturePercent', 1039: 'InverterTemperature',
+    1040: 'InverterTemperaturePercent', 1041: 'CatalyticConverterTemperature',
+    1042: 'BatteryLevel', 1043: 'BatteryVoltage',
+    // Generic channels (5000-6000)
+    5000: 'Analog', 5001: 'Digital', 5002: 'Frequency',
+    5003: 'Temperature', 5004: 'Acceleration', 5005: 'Pressure',
+    5006: 'Duration', 5007: 'DistanceShort', 5008: 'DistanceMedium', 5009: 'DistanceLong',
+    5010: 'Angle', 5011: 'Percent', 5012: 'Voltage', 5013: 'Weight',
+    5014: 'Volume', 5015: 'ElectricCurrent', 5016: 'Power', 5017: 'Torque', 5018: 'Energy',
+    // Engine/OBD channels (10000-11000)
+    10024: 'EngineRpm', 10025: 'ThrottlePosition',
+    10026: 'EngineCoolantTemperature', 10027: 'IntakeManifoldPressure',
+    10028: 'TimingAdvance', 10029: 'IntakeAirTemperature', 10030: 'MafAirflowRate',
+    10031: 'AmbientAirTemperature', 10032: 'EngineLoad',
+    10033: 'ObdShortTermFuelTrimB1', 10034: 'ObdLongTermFuelTrimB1',
+    10035: 'ObdShortTermFuelTrimB2', 10036: 'ObdLongTermFuelTrimB2',
+    10037: 'FuelPressure',
+    10038: 'ObdSecondaryAirStatus', 10039: 'ObdOxygenSensorsPresent',
+    10040: 'ObdVehicleStandards', 10041: 'ObdOxygenSensorsPresent2',
+    10042: 'ObdAuxiliaryInputStatus', 10043: 'ObdRunTimeSinceStart',
+    10044: 'ObdOxygenSensor1B1', 10045: 'ObdOxygenSensor2B1',
+    10046: 'ObdOxygenSensor3B1', 10047: 'ObdOxygenSensor4B1',
+    10048: 'ObdOxygenSensor1B2', 10049: 'ObdOxygenSensor2B2',
+    10050: 'ObdOxygenSensor3B2', 10051: 'ObdOxygenSensor4B2',
+    10052: 'ObdDistanceRunWithMIL', 10053: 'ObdFuelRailPressure',
+    10054: 'ObdFuelRailPressureDiesel', 10055: 'ObdCommanderEGR',
+    10056: 'ObdEGRError', 10057: 'ObdEvaporativePurge',
+    10058: 'FuelLevel',
+    10059: 'ObdWarmupsSinceCodesCleared', 10060: 'ObdDistanceSinceCodesCleared',
+    10061: 'ObdEvapSystemPressure', 10062: 'BarometricPressure',
+    10063: 'ObdControlModuleVoltage', 10064: 'ObdAbsoluteLoadValue',
+    10065: 'ObdRelativeThrottlePosition', 10066: 'EngineOilTemperature',
+    10067: 'ObdRelativeAcceleratorPedalPos',
+    10068: 'EngineFuelRate',
+    10069: 'ObdAbsoluteThrottlePositionB', 10070: 'ObdAbsoluteThrottlePositionC',
+    10071: 'AcceleratorPedalPosition',
+    10072: 'ObdAcceleratorPedalPositionE', 10073: 'ObdAcceleratorPedalPositionF',
+    10074: 'Lambda', 10075: 'IntakeManifoldRelativePressure', 10077: 'EthanolFuelContent',
+    // GPS channels (30000-31000)
+    30001: 'GpsDistanceDirect', 30002: 'GpsSatellites', 30003: 'GpsFixType',
+    30004: 'GpsHDOP', 30005: 'GpsVDOP', 30006: 'GpsPDOP', 30007: 'GpsAccuracy',
+    // Timer/Lap channels (32000+)
+    32001: 'LapComparisonTime', 32002: 'LapComparisonNumber',
+    32003: 'LapPreviousTime', 32005: 'LapPreviousNumber',
+    32012: 'LapCurrentTime', 32013: 'LapCurrentDistance', 32014: 'LapCurrentNumber',
+    32024: 'LapTotalRaceTime', 32025: 'LapTotalRaceDistance',
+    32026: 'LapBestTime', 32027: 'LapBestNumber', 32030: 'LapCurrentTimeGain',
+};
+
+// Known CAN channels with specific CSV column names and units (from decoder.py CAN_CHANNEL_MAP)
+// These override the generic CamelCase→snake_case conversion for matching the official CSV format
+const CAN_CHANNEL_MAP = {
+    4:     { name: 'speed', unit: 'm/s' },
+    1001:  { name: 'steering_angle', unit: 'deg' },
+    1002:  { name: 'brake_pos', unit: '%' },
+    1003:  { name: 'clutch_pos', unit: '%' },
+    1004:  { name: 'gear', unit: '' },
+    1005:  { name: 'gearbox_temp', unit: '.C' },
+    1006:  { name: 'clutch_temp', unit: '.C' },
+    1007:  { name: 'oil_pressure', unit: 'kPa' },
+    1008:  { name: 'engine_oil_level', unit: '' },
+    1009:  { name: 'brake_temp', unit: '.C' },
+    1010:  { name: 'odometer', unit: 'm' },
+    1011:  { name: 'engine_coolant_pressure', unit: 'kPa' },
+    1012:  { name: 'throttle_angle', unit: 'deg' },
+    1013:  { name: 'tyre_temp', unit: '.C' },
+    1014:  { name: 'tyre_pressure', unit: 'kPa' },
+    1015:  { name: 'wheel_speed', unit: 'm/s' },
+    1016:  { name: 'wheel_speed_frequency', unit: 'Hz' },
+    1017:  { name: 'suspension_travel', unit: 'mm' },
+    1019:  { name: 'emergency_brake_pos', unit: '%' },
+    1020:  { name: 'fuel_level_volume', unit: 'L' },
+    1021:  { name: 'engine_coolant_level', unit: '' },
+    1022:  { name: 'engine_coolant_level_volume', unit: 'L' },
+    1023:  { name: 'air_fuel_ratio', unit: '' },
+    1024:  { name: 'engine_oil_level_volume', unit: 'L' },
+    1025:  { name: 'engine_knock_correction', unit: '' },
+    1026:  { name: 'engine_wastegate_duty_cycle', unit: '%' },
+    1027:  { name: 'engine_power', unit: 'kW' },
+    1028:  { name: 'engine_current', unit: 'A' },
+    1029:  { name: 'engine_torque', unit: 'Nm' },
+    1030:  { name: 'inverter_power', unit: 'kW' },
+    1031:  { name: 'battery_level_energy', unit: 'kWh' },
+    1032:  { name: 'battery_current', unit: 'A' },
+    1033:  { name: 'brake_pressure', unit: 'kPa' },
+    1034:  { name: 'state_of_charge', unit: '%' },
+    1035:  { name: 'tyre_slip', unit: '' },
+    1036:  { name: 'brake_temp_percent', unit: '%' },
+    1037:  { name: 'battery_temp', unit: '.C' },
+    1038:  { name: 'battery_temp_percent', unit: '%' },
+    1039:  { name: 'inverter_temp', unit: '.C' },
+    1040:  { name: 'inverter_temp_percent', unit: '%' },
+    1041:  { name: 'catalytic_converter_temp', unit: '.C' },
+    1042:  { name: 'battery_level', unit: '%' },
+    1043:  { name: 'battery_voltage', unit: 'V' },
+    10024: { name: 'rpm', unit: 'rpm' },
+    10025: { name: 'throttle_pos', unit: '%' },
+    10026: { name: 'coolant_temp', unit: '.C' },
+    10027: { name: 'intake_pressure', unit: 'kPa' },
+    10028: { name: 'timing_advance', unit: 'deg' },
+    10029: { name: 'intake_air_temp', unit: '.C' },
+    10030: { name: 'maf', unit: 'g/s' },
+    10031: { name: 'air_temp', unit: '.C' },
+    10032: { name: 'engine_load', unit: '%' },
+    10037: { name: 'fuel_pressure', unit: 'kPa' },
+    10058: { name: 'fuel_level', unit: '%' },
+    10062: { name: 'baro_pressure', unit: 'kPa' },
+    10066: { name: 'engine_oil_temp', unit: '.C' },
+    10068: { name: 'fuel_rate', unit: 'L/h' },
+    10071: { name: 'accelerator_pos', unit: '%' },
+    10074: { name: 'lambda', unit: '' },
+    10075: { name: 'intake_manifold_relative_pressure', unit: 'kPa' },
+    10077: { name: 'ethanol_fuel_content', unit: '%' },
+};
+
+const RCZ_POSITION_SUFFIX = { 0: '', 3: '_rr', 4: '_rl', 5: '_fr', 6: '_fl' };
+
+const RCZ_SENSOR_CHANNELS = {
+    2: { 9: { name: 'x_acc', unit: 'G' }, 10: { name: 'y_acc', unit: 'G' }, 11: { name: 'z_acc', unit: 'G' } },
+    3: { 12: { name: 'x_rate_of_rotation', unit: 'deg/s' }, 13: { name: 'y_rate_of_rotation', unit: 'deg/s' }, 14: { name: 'z_rate_of_rotation', unit: 'deg/s' } },
+    8: { 28: { name: 'x_magnetic_field', unit: 'uT' }, 29: { name: 'y_magnetic_field', unit: 'uT' }, 30: { name: 'z_magnetic_field', unit: 'uT' } },
+};
+
+const RCZ_SENSOR_TYPE_LABEL = { 2: 'acc', 3: 'gyro', 8: 'magn' };
+
+// Channel ID bit manipulation
+function rczGetBaseId(id) { return id & 0x7FFF; }
+function rczGetSensorPos(id) { return (id >> 15) & 0x1F; }
+function rczGetSensorIdx(id) { return (id >> 20) & 0x3F; }
+
+function rczCamelToSnake(str) {
+    return str.replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+              .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2')
+              .toLowerCase();
+}
+
+function rczGetCanChannelInfo(channelId) {
+    const baseId = rczGetBaseId(channelId);
+    const position = rczGetSensorPos(channelId);
+    const index = rczGetSensorIdx(channelId);
+
+    let name, unit;
+    if (CAN_CHANNEL_MAP[baseId]) {
+        // Known channel with specific CSV name and unit
+        name = CAN_CHANNEL_MAP[baseId].name;
+        unit = CAN_CHANNEL_MAP[baseId].unit;
+    } else if (RCZ_CHANNEL_NAMES[baseId]) {
+        // Known channel ID - convert CamelCase to snake_case
+        name = rczCamelToSnake(RCZ_CHANNEL_NAMES[baseId]);
+        unit = '';
+    } else {
+        // Completely unknown channel ID
+        name = `channel_${baseId}`;
+        unit = '';
+    }
+
+    const posSuffix = RCZ_POSITION_SUFFIX[position] ?? `_pos${position}`;
+    name += posSuffix;
+    if (index > 0) name += `_${index}`;
+
+    return { name, unit };
+}
+
+// Binary readers
+const NO_DATA_INT32 = 0x7FFFFFFF;
+
+function rczReadTimestamps(buffer) {
+    const view = new DataView(buffer);
+    const count = buffer.byteLength / 8;
+    const result = new Float64Array(count);
+    for (let i = 0; i < count; i++) {
+        const lo = view.getUint32(i * 8, true);
+        const hi = view.getUint32(i * 8 + 4, true);
+        result[i] = (lo + hi * 4294967296) / 1000.0;
+    }
+    return result;
+}
+
+function rczReadInt32(buffer, scale = 1) {
+    const view = new DataView(buffer);
+    const count = buffer.byteLength / 4;
+    const result = new Float64Array(count);
+    for (let i = 0; i < count; i++) {
+        const v = view.getInt32(i * 4, true);
+        result[i] = (v === NO_DATA_INT32) ? NaN : v / scale;
+    }
+    return result;
+}
+
+function rczReadDoubles(buffer) {
+    const view = new DataView(buffer);
+    const count = buffer.byteLength / 8;
+    const result = new Float64Array(count);
+    for (let i = 0; i < count; i++) {
+        result[i] = view.getFloat64(i * 8, true);
+    }
+    return result;
+}
+
+function rczReadPositions(buffer) {
+    const view = new DataView(buffer);
+    const count = buffer.byteLength / 8;
+    const lats = new Float64Array(count);
+    const lons = new Float64Array(count);
+    for (let i = 0; i < count; i++) {
+        lats[i] = view.getInt32(i * 8, true) / 6000000;
+        lons[i] = view.getInt32(i * 8 + 4, true) / 6000000;
+    }
+    return { lats, lons };
+}
+
+// Interpolation helpers
+function rczInterpNanAware(xNew, xOrig, yOrig) {
+    const vx = [], vy = [];
+    for (let i = 0; i < xOrig.length; i++) {
+        if (!isNaN(yOrig[i])) { vx.push(xOrig[i]); vy.push(yOrig[i]); }
+    }
+    const n = xNew.length;
+    const m = vx.length;
+    const result = new Float64Array(n);
+    if (m < 2) { result.fill(NaN); return result; }
+
+    for (let i = 0; i < n; i++) {
+        const x = xNew[i];
+        if (x < vx[0] || x > vx[m - 1]) { result[i] = NaN; continue; }
+        // Binary search: find first j where vx[j] >= x
+        let lo = 0, hi = m - 1;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (vx[mid] < x) lo = mid + 1; else hi = mid; }
+        if (vx[lo] === x || lo === 0) { result[i] = vy[lo]; }
+        else { const t = (x - vx[lo - 1]) / (vx[lo] - vx[lo - 1]); result[i] = vy[lo - 1] + t * (vy[lo] - vy[lo - 1]); }
+    }
+    return result;
+}
+
+function rczZeroOrderHold(xNew, xOrig, yOrig) {
+    const n = xNew.length;
+    const result = new Float64Array(n);
+    result.fill(NaN);
+    for (let i = 0; i < n; i++) {
+        const x = xNew[i];
+        // Binary search: find last idx where xOrig[idx] <= x
+        let lo = 0, hi = xOrig.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (xOrig[mid] <= x) lo = mid + 1; else hi = mid; }
+        const idx = lo - 1;
+        if (idx >= 0 && idx < yOrig.length) result[i] = yOrig[idx];
+    }
+    return result;
+}
+
+function rczComputeUpdateRates(timestamps, windowSec = 1.0) {
+    const n = timestamps.length;
+    if (n < 2) return new Float64Array(n).fill(NaN);
+    const rates = new Float64Array(n);
+    rates.fill(NaN);
+    let left = 0;
+    for (let i = 1; i < n; i++) {
+        while (left < i - 1 && timestamps[i] - timestamps[left] > windowSec) left++;
+        const dt = timestamps[i] - timestamps[left];
+        if (dt > 0) rates[i] = (i - left) / dt;
+    }
+    rates[0] = n > 1 ? rates[1] : NaN;
+    return rates;
+}
+
+function rczSmoothRaw(values, halfWindow = 3) {
+    const n = values.length;
+    const smoothed = new Float64Array(n);
+    smoothed.fill(NaN);
+    for (let i = 0; i < n; i++) {
+        const lo = Math.max(0, i - halfWindow);
+        const hi = Math.min(n, i + halfWindow + 1);
+        let sum = 0, cnt = 0;
+        for (let j = lo; j < hi; j++) {
+            if (!isNaN(values[j])) { sum += values[j]; cnt++; }
+        }
+        if (cnt > 0) smoothed[i] = sum / cnt;
+    }
+    return smoothed;
+}
+
+function rczRoundArray(arr, dp = 3) {
+    const factor = Math.pow(10, dp);
+    const result = new Float64Array(arr.length);
+    for (let i = 0; i < arr.length; i++) result[i] = Math.round(arr[i] * factor) / factor;
+    return result;
+}
+
+function rczUniqueSorted(arrays) {
+    let total = 0;
+    for (const a of arrays) total += a.length;
+    const combined = new Float64Array(total);
+    let offset = 0;
+    for (const a of arrays) { combined.set(a, offset); offset += a.length; }
+    combined.sort();
+    if (combined.length === 0) return combined;
+    const result = [combined[0]];
+    for (let i = 1; i < combined.length; i++) {
+        if (combined[i] !== result[result.length - 1]) result.push(combined[i]);
+    }
+    return new Float64Array(result);
+}
+
+function rczSetLoadingStatus(text) {
+    const el = document.getElementById('loading-status');
+    if (el) el.textContent = text;
+}
+
+// Main RCZ decode function
+async function decodeRCZ(file) {
+    const zip = await JSZip.loadAsync(file);
+
+    // Helper to get file from ZIP as ArrayBuffer
+    async function getFile(name) {
+        let f = zip.file(name);
+        if (!f) {
+            // Try finding it case-insensitively or in subdirectories
+            const matches = zip.file(new RegExp('(^|/)' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'));
+            if (matches.length > 0) f = matches[0];
+        }
+        return f ? await f.async('arraybuffer') : null;
+    }
+    async function getJSON(name) {
+        let f = zip.file(name);
+        if (!f) {
+            const matches = zip.file(new RegExp('(^|/)' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'));
+            if (matches.length > 0) f = matches[0];
+        }
+        return f ? JSON.parse(await f.async('string')) : null;
+    }
+
+    // ── Load metadata ──
+    rczSetLoadingStatus('Loading metadata...');
+    const sessionInfo = await getJSON('session.json');
+    if (!sessionInfo) throw new Error('session.json not found in RCZ file');
+
+    const fragmentInfo = await getJSON('sessionfragment.json');
+    const primaryGpsDevId = fragmentInfo?.primaryGpsDeviceIndex ?? 100;
+    let devices = [];
+    if (fragmentInfo) {
+        const devData = fragmentInfo.devices;
+        if (devData && devData.items) devices = devData.items;
+        else if (Array.isArray(devData)) devices = devData;
+    }
+
+    // ── Decode GPS channels ──
+    rczSetLoadingStatus('Decoding GPS channels...');
+    const gpsTimestampsBuf = await getFile(`channel_1_${primaryGpsDevId}_0_1_1`);
+    if (!gpsTimestampsBuf) throw new Error('No GPS timestamps found in RCZ file');
+
+    const gpsTimestamps = rczReadTimestamps(gpsTimestampsBuf);
+    let gpsNativeRateHz = 1;
+    if (gpsTimestamps.length > 1) {
+        const avgDt = (gpsTimestamps[gpsTimestamps.length - 1] - gpsTimestamps[0]) / (gpsTimestamps.length - 1);
+        gpsNativeRateHz = avgDt > 0 ? Math.round(1.0 / avgDt) : 1;
+    }
+
+    const gpsSource = `${primaryGpsDevId}: gps`;
+
+    // Channels storage: { name: { timestamps, values, unit, source } }
+    const channels = {};
+
+    // Position (lat/lon)
+    const posBuf = await getFile(`channel_1_${primaryGpsDevId}_0_3_1`);
+    if (posBuf) {
+        const { lats, lons } = rczReadPositions(posBuf);
+        channels.latitude = { timestamps: gpsTimestamps, values: lats, unit: 'deg', source: gpsSource };
+        channels.longitude = { timestamps: gpsTimestamps, values: lons, unit: 'deg', source: gpsSource };
+    }
+
+    // GPS data channels: [channelId, name, scale, fileSuffix, stride]
+    const gpsChannelDefs = [
+        [2,     'distance_traveled', 1000, '1', 2],
+        [4,     'speed',             1000, '0', 1],
+        [5,     'altitude',          1000, '0', 1],
+        [6,     'bearing',           1000, '0', 1],
+        [46,    'device_battery_level', 1000, '0', 1],
+        [30002, 'satellites',        1,    '0', 1],
+        [30003, 'fix_type',          1,    '0', 1],
+        [30007, 'accuracy',          1000, '0', 1],
+    ];
+
+    for (const [chId, name, scale, suffix, stride] of gpsChannelDefs) {
+        const buf = await getFile(`channel_1_${primaryGpsDevId}_0_${chId}_${suffix}`);
+        if (!buf) continue;
+        let values = rczReadInt32(buf, scale);
+        if (stride === 2) values = values.filter((_, i) => i % 2 === 0);
+        if (values.length > gpsTimestamps.length) values = values.slice(0, gpsTimestamps.length);
+        channels[name] = { timestamps: gpsTimestamps, values, unit: '', source: gpsSource };
+    }
+
+    // ── Decode CAN bus channels ──
+    rczSetLoadingStatus('Decoding CAN bus channels...');
+    const allCanbusTimestamps = [];
+    const canbusChannelOrder = [];
+    const canbusChannelUnits = {};
+
+    // Find all channel2_12_200_*_*_3 files
+    const channel2Regex = /^channel2_12_200_(\d+)_\d+_3$/;
+    const channel2Files = [];
+    zip.forEach((path, entry) => {
+        const match = entry.name.match(channel2Regex);
+        if (match) channel2Files.push({ name: entry.name, channelId: parseInt(match[1]) });
+    });
+
+    for (const { name: fileName, channelId } of channel2Files) {
+        const { name: canName, unit } = rczGetCanChannelInfo(channelId);
+
+        // Read per-channel timestamps
+        let tsBuf = await getFile(`channel_12_200_${channelId}_1_1`);
+        if (!tsBuf) tsBuf = await getFile('channel_12_200_1_1_1');
+        if (!tsBuf) continue;
+
+        const timestamps = rczReadTimestamps(tsBuf);
+        const valBuf = await getFile(fileName);
+        if (!valBuf) continue;
+
+        let values = rczReadDoubles(valBuf);
+        const minLen = Math.min(timestamps.length, values.length);
+
+        const canbusKey = `canbus_${canName}`;
+        channels[canbusKey] = {
+            timestamps: timestamps.slice(0, minLen),
+            values: values.slice(0, minLen),
+            unit,
+            source: '200: canbus'
+        };
+
+        allCanbusTimestamps.push(timestamps.slice(0, minLen));
+        if (!canbusChannelOrder.includes(canName)) canbusChannelOrder.push(canName);
+        canbusChannelUnits[canName] = unit;
+    }
+    canbusChannelOrder.sort();
+
+    // ── Decode sensor channels ──
+    rczSetLoadingStatus('Decoding sensor channels...');
+    const allSensorTimestamps = [];
+    const sensorDevices = [];
+
+    const sensorGroups = {};
+    for (const dev of devices) {
+        const devType = dev.type;
+        if (RCZ_SENSOR_TYPE_LABEL[devType]) {
+            if (!sensorGroups[devType]) sensorGroups[devType] = [];
+            sensorGroups[devType].push(dev.id);
+        }
+    }
+
+    for (const devType of Object.keys(sensorGroups).map(Number).sort()) {
+        const deviceIds = sensorGroups[devType].sort((a, b) => a - b);
+        const typeLabel = RCZ_SENSOR_TYPE_LABEL[devType];
+        const channelDefs = RCZ_SENSOR_CHANNELS[devType] || {};
+
+        for (const devId of deviceIds) {
+            const source = `${devId}: ${typeLabel}`;
+            const tsBuf = await getFile(`channel_${devType}_${devId}_0_1_1`);
+            if (!tsBuf) continue;
+
+            const timestamps = rczReadTimestamps(tsBuf);
+            allSensorTimestamps.push(timestamps);
+            const colNames = [];
+
+            for (const chId of Object.keys(channelDefs).map(Number).sort()) {
+                const chInfo = channelDefs[chId];
+                const dataBuf = await getFile(`channel_${devType}_${devId}_0_${chId}_0`);
+                if (!dataBuf) continue;
+
+                let values = rczReadInt32(dataBuf, 1000.0);
+                // Convert accelerometer from m/s² to G
+                if (devType === 2) {
+                    for (let i = 0; i < values.length; i++) {
+                        if (!isNaN(values[i])) values[i] /= 9.80665;
+                    }
+                }
+
+                const minLen = Math.min(timestamps.length, values.length);
+                const key = `sensor_${devId}_${chInfo.name}`;
+                channels[key] = {
+                    timestamps: timestamps.slice(0, minLen),
+                    values: values.slice(0, minLen),
+                    unit: chInfo.unit,
+                    source
+                };
+                colNames.push(chInfo.name);
+            }
+
+            if (colNames.length > 0) {
+                sensorDevices.push({ devId, devType, source, columns: colNames, timestamps });
+            }
+        }
+    }
+
+    // ── Build combined timeline ──
+    rczSetLoadingStatus('Building timeline...');
+    const gpsStart = gpsTimestamps[0];
+    const gpsEnd = gpsTimestamps[gpsTimestamps.length - 1];
+    const sampleRateHz = 20.0;
+    let combined;
+
+    if (gpsNativeRateHz <= 1) {
+        // 1Hz GPS: build 20Hz grid, merge with CAN timestamps
+        const dt = 1.0 / sampleRateHz;
+        const gridArr = [];
+        for (let t = gpsStart + dt; t <= gpsEnd + dt / 2; t += dt) {
+            gridArr.push(Math.round(t * 1000) / 1000);
+        }
+        const gpsGrid = new Float64Array(gridArr);
+
+        if (allCanbusTimestamps.length > 0) {
+            const canRounded = [];
+            for (const ts of allCanbusTimestamps) {
+                const rounded = rczRoundArray(ts);
+                for (let i = 0; i < rounded.length; i++) {
+                    if (rounded[i] >= gpsStart && rounded[i] <= gpsEnd) canRounded.push(rounded[i]);
+                }
+            }
+            combined = rczUniqueSorted([gpsGrid, new Float64Array(canRounded)]);
+        } else {
+            combined = gpsGrid;
+        }
+    } else {
+        // 25Hz GPS: union of all timestamps + 20Hz calc grid
+        const allTs = [rczRoundArray(gpsTimestamps)];
+        for (const ts of allCanbusTimestamps) allTs.push(rczRoundArray(ts));
+        for (const ts of allSensorTimestamps) allTs.push(rczRoundArray(ts));
+
+        // 20Hz calc grid
+        const gridOriginMs = (sessionInfo.firstTimestamp || Math.round(gpsStart * 1000)) + 40;
+        const dtMs = Math.round(1000 / sampleRateHz);
+        const gpsStartMs = Math.round(gpsStart * 1000);
+        const gpsEndMs = Math.round(gpsEnd * 1000);
+        const firstStep = Math.ceil((gpsStartMs - gridOriginMs) / dtMs);
+        const lastStep = Math.floor((gpsEndMs - gridOriginMs) / dtMs);
+        const calcGrid = [];
+        for (let s = firstStep; s <= lastStep; s++) {
+            calcGrid.push((s * dtMs + gridOriginMs) / 1000.0);
+        }
+        allTs.push(new Float64Array(calcGrid));
+
+        // Lap boundary timestamps
+        if (sessionInfo.laps) {
+            const lapTs = [];
+            for (const lap of sessionInfo.laps) {
+                if (lap.startTimestamp) lapTs.push(lap.startTimestamp / 1000.0);
+                if (lap.finishTimestamp) lapTs.push(lap.finishTimestamp / 1000.0);
+            }
+            if (lapTs.length > 0) allTs.push(new Float64Array(lapTs));
+        }
+
+        combined = rczUniqueSorted(allTs);
+        // Clip to GPS range
+        const filtered = [];
+        for (let i = 0; i < combined.length; i++) {
+            if (combined[i] >= gpsStart) filtered.push(combined[i]);
+        }
+        combined = new Float64Array(filtered);
+    }
+
+    // ── Compute elapsed time reference ──
+    let elapsedReference;
+    if (sessionInfo.firstTimestamp) {
+        const firstTsSec = sessionInfo.firstTimestamp / 1000.0;
+        elapsedReference = gpsNativeRateHz <= 1 ? Math.ceil(firstTsSec) : firstTsSec + 0.04;
+    } else {
+        elapsedReference = gpsStart;
+    }
+
+    // ── Resample all channels onto combined timeline ──
+    rczSetLoadingStatus('Resampling channels...');
+    const resampled = {};
+    resampled.timestamp = combined;
+    const elapsedArr = new Float64Array(combined.length);
+    for (let i = 0; i < combined.length; i++) elapsedArr[i] = combined[i] - elapsedReference;
+    resampled.elapsed_time = elapsedArr;
+
+    const zohChannels = new Set(['bearing']);
+
+    for (const [name, channel] of Object.entries(channels)) {
+        if (zohChannels.has(name)) {
+            resampled[name] = rczZeroOrderHold(combined, channel.timestamps, channel.values);
+        } else {
+            resampled[name] = rczInterpNanAware(combined, channel.timestamps, channel.values);
+        }
+    }
+
+    // GPS device_update_rate
+    const gpsRates = rczComputeUpdateRates(gpsTimestamps);
+    resampled.gps_device_update_rate = rczInterpNanAware(combined, gpsTimestamps, gpsRates);
+
+    // Sensor device_update_rates
+    for (const sensor of sensorDevices) {
+        const rates = rczComputeUpdateRates(sensor.timestamps);
+        resampled[`sensor_${sensor.devId}_update_rate`] = rczInterpNanAware(combined, sensor.timestamps, rates);
+    }
+
+    // ── Computed calculated fields ──
+    rczSetLoadingStatus('Computing calculated fields...');
+    const numRows = combined.length;
+    const elapsed = resampled.elapsed_time;
+
+    if (channels.speed) {
+        const rawSpeed = channels.speed.values;
+        const rawTs = channels.speed.timestamps;
+        const nGps = rawTs.length;
+        const N = 3;
+
+        // Longitudinal acceleration
+        const rawLongAcc = new Float64Array(nGps).fill(NaN);
+        for (let i = N; i < nGps - N; i++) {
+            const dt = rawTs[i + N] - rawTs[i - N];
+            if (dt > 0 && !isNaN(rawSpeed[i + N]) && !isNaN(rawSpeed[i - N])) {
+                rawLongAcc[i] = (rawSpeed[i + N] - rawSpeed[i - N]) / dt / 9.81;
+            }
+        }
+        for (let i = 1; i < N; i++) {
+            const dt = rawTs[i + 1] - rawTs[i - 1];
+            if (dt > 0 && !isNaN(rawSpeed[i + 1]) && !isNaN(rawSpeed[i - 1])) {
+                rawLongAcc[i] = (rawSpeed[i + 1] - rawSpeed[i - 1]) / dt / 9.81;
+            }
+        }
+        for (let i = nGps - N; i < nGps - 1; i++) {
+            const ip = Math.min(i + 1, nGps - 1), im = Math.max(i - 1, 0);
+            const dt = rawTs[ip] - rawTs[im];
+            if (dt > 0) rawLongAcc[i] = (rawSpeed[ip] - rawSpeed[im]) / dt / 9.81;
+        }
+        const smoothedLongAcc = rczSmoothRaw(rawLongAcc, 2);
+        const longAccInterp = rczInterpNanAware(combined, rawTs, smoothedLongAcc);
+        for (let i = 0; i < numRows; i++) { if (elapsed[i] < 0.45 - 1e-6) longAccInterp[i] = NaN; }
+        resampled.longitudinal_acc = longAccInterp;
+
+        // Lateral acceleration
+        const rawLatAcc = new Float64Array(nGps).fill(NaN);
+        if (channels.bearing) {
+            const rawBearing = channels.bearing.values;
+            for (let i = N; i < nGps - N; i++) {
+                const dt = rawTs[i + N] - rawTs[i - N];
+                if (dt > 0 && !isNaN(rawBearing[i + N]) && !isNaN(rawBearing[i - N])) {
+                    let db = rawBearing[i + N] - rawBearing[i - N];
+                    if (db > 180) db -= 360;
+                    else if (db < -180) db += 360;
+                    const yawRate = (db * Math.PI / 180) / dt;
+                    const spd = isNaN(rawSpeed[i]) ? 0 : rawSpeed[i];
+                    rawLatAcc[i] = -(spd * yawRate / 9.81);
+                }
+            }
+        }
+        const smoothedLatAcc = rczSmoothRaw(rawLatAcc, 2);
+        const latAccInterp = rczInterpNanAware(combined, rawTs, smoothedLatAcc);
+        for (let i = 0; i < numRows; i++) { if (elapsed[i] < 0.45 - 1e-6) latAccInterp[i] = NaN; }
+        resampled.lateral_acc = latAccInterp;
+
+        // Combined acceleration
+        const combinedAcc = new Float64Array(numRows).fill(NaN);
+        for (let i = 0; i < numRows; i++) {
+            if (!isNaN(longAccInterp[i]) && !isNaN(latAccInterp[i])) {
+                combinedAcc[i] = Math.sqrt(longAccInterp[i] ** 2 + latAccInterp[i] ** 2);
+            }
+        }
+        resampled.combined_acc = combinedAcc;
+
+        // Lean angle
+        const leanAngle = new Float64Array(numRows).fill(NaN);
+        for (let i = 0; i < numRows; i++) {
+            if (!isNaN(latAccInterp[i])) {
+                leanAngle[i] = Math.atan(-latAccInterp[i]) * (180 / Math.PI);
+            }
+        }
+        resampled.lean_angle = leanAngle;
+
+        // Calc speed = copy of GPS speed
+        resampled.calc_speed = Float64Array.from(resampled.speed);
+    }
+
+    // ── Build lap lookup ──
+    const laps = sessionInfo.laps || [];
+    const lapBoundaries = laps.map(lap => ({
+        start: (lap.startTimestamp || 0) / 1000.0,
+        end: lap.finishTimestamp ? lap.finishTimestamp / 1000.0 : Infinity,
+        number: lap.number || 0,
+    }));
+
+    function getLapNumber(ts) {
+        for (const { start, end, number } of lapBoundaries) {
+            if (ts >= start && ts < end) return number;
+        }
+        return null;
+    }
+
+    // ── Build output in viewer format ──
+    rczSetLoadingStatus('Building output...');
+
+    // Metadata
+    const sessionTitle = sessionInfo.title || sessionInfo.firstPositionReverseGeocoding || 'Unknown';
+    const trackName = sessionInfo.trackName || '';
+    const hasTrack = !!trackName;
+    const sessionType = hasTrack ? 'Lap timing' : 'Data logging';
+    const createdTs = (sessionInfo.timeCreated || sessionInfo.firstTimestamp || 0) / 1000;
+    const createdDate = new Date(createdTs * 1000);
+    const note = sessionInfo.description || '';
+
+    const meta = {
+        session_title: sessionTitle,
+        track_name: trackName,
+        session_type: sessionType,
+        created: createdDate.toLocaleDateString('en-GB') + ' ' + createdDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+        note: note,
+    };
+
+    const hasBattery = !!resampled.device_battery_level;
+    const useDynamicGpsRate = gpsNativeRateHz > 1;
+
+    // Build columns list (matching CSV export order)
+    const columns = ['timestamp', 'fragment_id', 'lap_number', 'elapsed_time', 'distance_traveled',
+        'accuracy', 'altitude', 'bearing'];
+    const units = ['unix time', '', '', 's', 'm', 'm', 'm', 'deg'];
+    const sources = ['', '', '', '', gpsSource, gpsSource, gpsSource, gpsSource];
+
+    if (hasBattery) {
+        columns.push('device_battery_level'); units.push('%'); sources.push(gpsSource);
+    }
+    columns.push('device_update_rate', 'fix_type', 'latitude', 'longitude', 'satellites', 'speed');
+    units.push('Hz', '', 'deg', 'deg', 'sats', 'm/s');
+    sources.push(gpsSource, gpsSource, gpsSource, gpsSource, gpsSource, gpsSource);
+
+    // Calc columns
+    const calcCols = ['combined_acc', 'device_update_rate_calc', 'lateral_acc', 'lean_angle', 'longitudinal_acc', 'speed_calc'];
+    const calcUnits = ['G', 'Hz', 'G', 'deg', 'G', 'm/s'];
+    for (let i = 0; i < calcCols.length; i++) {
+        columns.push(calcCols[i]); units.push(calcUnits[i]); sources.push('calc');
+    }
+
+    // CAN columns
+    for (const canName of canbusChannelOrder) {
+        columns.push(canName);
+        units.push(canbusChannelUnits[canName] || '');
+        sources.push('200: canbus');
+    }
+
+    // Sensor columns
+    for (const sensor of sensorDevices) {
+        columns.push('device_update_rate'); units.push('Hz'); sources.push(sensor.source);
+        for (const col of sensor.columns) {
+            columns.push(col);
+            let unit = '';
+            for (const chDefs of Object.values(RCZ_SENSOR_CHANNELS)) {
+                for (const chInfo of Object.values(chDefs)) {
+                    if (chInfo.name === col) { unit = chInfo.unit; break; }
+                }
+            }
+            units.push(unit);
+            sources.push(sensor.source);
+        }
+    }
+
+    // Build data rows
+    const data = [];
+    for (let i = 0; i < numRows; i++) {
+        const ts = combined[i];
+        const row = {
+            timestamp: ts,
+            fragment_id: 0,
+            lap_number: getLapNumber(ts),
+            elapsed_time: elapsed[i],
+            distance_traveled: isNaN(resampled.distance_traveled?.[i]) ? null : resampled.distance_traveled[i],
+            accuracy: isNaN(resampled.accuracy?.[i]) ? null : resampled.accuracy[i],
+            altitude: isNaN(resampled.altitude?.[i]) ? null : resampled.altitude[i],
+            bearing: isNaN(resampled.bearing?.[i]) ? null : resampled.bearing[i],
+        };
+
+        if (hasBattery) {
+            row.device_battery_level = isNaN(resampled.device_battery_level[i]) ? null : resampled.device_battery_level[i];
+        }
+
+        // GPS device_update_rate
+        if (useDynamicGpsRate) {
+            row.device_update_rate = isNaN(resampled.gps_device_update_rate?.[i]) ? null : resampled.gps_device_update_rate[i];
+        } else {
+            const timeSinceStart = ts - gpsStart;
+            row.device_update_rate = timeSinceStart >= 1.0 - 1e-6 ? 1.0 : null;
+        }
+
+        row.fix_type = isNaN(resampled.fix_type?.[i]) ? null : resampled.fix_type[i];
+        row.latitude = isNaN(resampled.latitude?.[i]) ? null : resampled.latitude[i];
+        row.longitude = isNaN(resampled.longitude?.[i]) ? null : resampled.longitude[i];
+        row.satellites = isNaN(resampled.satellites?.[i]) ? null : resampled.satellites[i];
+        row.speed = isNaN(resampled.speed?.[i]) ? null : resampled.speed[i];
+
+        // Calc columns
+        row.combined_acc = isNaN(resampled.combined_acc?.[i]) ? null : resampled.combined_acc[i];
+        row.device_update_rate_calc = 20.0;
+        row.lateral_acc = isNaN(resampled.lateral_acc?.[i]) ? null : resampled.lateral_acc[i];
+        row.lean_angle = isNaN(resampled.lean_angle?.[i]) ? null : resampled.lean_angle[i];
+        row.longitudinal_acc = isNaN(resampled.longitudinal_acc?.[i]) ? null : resampled.longitudinal_acc[i];
+        row.speed_calc = isNaN(resampled.calc_speed?.[i]) ? null : resampled.calc_speed[i];
+
+        // CAN columns
+        for (const canName of canbusChannelOrder) {
+            const key = `canbus_${canName}`;
+            row[canName] = isNaN(resampled[key]?.[i]) ? null : resampled[key][i];
+        }
+
+        // Sensor columns
+        for (const sensor of sensorDevices) {
+            const rateKey = `sensor_${sensor.devId}_update_rate`;
+            row['device_update_rate'] = isNaN(resampled[rateKey]?.[i]) ? null : resampled[rateKey][i];
+            for (const col of sensor.columns) {
+                const dataKey = `sensor_${sensor.devId}_${col}`;
+                row[col] = isNaN(resampled[dataKey]?.[i]) ? null : resampled[dataKey][i];
+            }
+        }
+
+        data.push(row);
+    }
+
+    return { meta, columns, units, sources, data };
+}
 
 // ── Lap extraction & rendering ───────────────────────────────────────────
 
@@ -1065,44 +1946,59 @@ dropZone.addEventListener('drop', e => {
 dropZone.addEventListener('click', () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.csv';
+    input.accept = '.csv,.rcz';
     input.onchange = () => {
         if (input.files[0]) handleFile(input.files[0]);
     };
     input.click();
 });
 
-function handleFile(file) {
-    if (!file.name.endsWith('.csv')) {
-        alert('Please drop a CSV file.');
+function showParsed(parsed, fileName) {
+    if (parsed.data.length === 0) {
+        alert('No data rows found.');
         return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const text = e.target.result;
-        const parsed = parseCSV(text);
+    dropZone.style.display = 'none';
+    dashboard.classList.add('visible');
 
-        if (parsed.data.length === 0) {
-            alert('No data rows found in CSV.');
-            return;
-        }
+    globalParsed = parsed;
+    selectedLaps = null;
 
-        dropZone.style.display = 'none';
-        dashboard.classList.add('visible');
+    globalLaps = extractLaps(parsed);
+    renderLapPanel(globalLaps);
 
-        globalParsed = parsed;
-        selectedLaps = null;
+    renderMeta(parsed, fileName);
+    initTrack(document.getElementById('track-canvas'), parsed.data);
+    createCharts(parsed);
+}
 
-        // Extract and render laps
-        globalLaps = extractLaps(parsed);
-        renderLapPanel(globalLaps);
+function handleFile(file) {
+    const ext = file.name.split('.').pop().toLowerCase();
 
-        renderMeta(parsed, file.name);
-        initTrack(document.getElementById('track-canvas'), parsed.data);
-        createCharts(parsed);
-    };
-    reader.readAsText(file);
+    if (ext === 'rcz') {
+        // Show loading overlay
+        document.getElementById('loading').style.display = 'flex';
+        rczSetLoadingStatus('Loading file...');
+
+        decodeRCZ(file).then(parsed => {
+            document.getElementById('loading').style.display = 'none';
+            showParsed(parsed, file.name);
+        }).catch(err => {
+            document.getElementById('loading').style.display = 'none';
+            alert('Error decoding RCZ file: ' + err.message);
+            console.error(err);
+        });
+    } else if (ext === 'csv') {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const parsed = parseCSV(e.target.result);
+            showParsed(parsed, file.name);
+        };
+        reader.readAsText(file);
+    } else {
+        alert('Please drop a CSV or RCZ file.');
+    }
 }
 </script>
 </body>
