@@ -599,6 +599,7 @@ class RaceChronoDecoder:
                 combined = gps_grid
         else:
             # NEW FORMAT: Union of ALL device timestamps (GPS + CAN + sensors)
+            # plus a 20Hz interpolation grid for calculated fields
             all_ts = [np.round(self.gps_timestamps, 3)]
             if self.all_canbus_timestamps:
                 for ts in self.all_canbus_timestamps:
@@ -606,7 +607,43 @@ class RaceChronoDecoder:
             if self.all_sensor_timestamps:
                 for ts in self.all_sensor_timestamps:
                     all_ts.append(np.round(ts, 3))
+
+            # Generate 20Hz interpolation grid (matches official app behavior)
+            # Grid origin = firstTimestamp/1000 + 0.04 (the elapsed_reference)
+            # Use integer millisecond arithmetic to avoid floating-point drift
+            if self.session_info and 'firstTimestamp' in self.session_info:
+                grid_origin_ms = self.session_info['firstTimestamp'] + 40  # +40ms
+            else:
+                grid_origin_ms = round(gps_start * 1000)
+            dt_ms = round(1000 / sample_rate_hz)  # 50ms for 20Hz
+            gps_start_ms = round(gps_start * 1000)
+            gps_end_ms = round(gps_end * 1000)
+            # First grid step at or after GPS start
+            first_step = math.ceil((gps_start_ms - grid_origin_ms) / dt_ms)
+            # Last grid step at or before GPS end
+            last_step = math.floor((gps_end_ms - grid_origin_ms) / dt_ms)
+            calc_grid_ms = np.arange(first_step, last_step + 1) * dt_ms + grid_origin_ms
+            calc_grid = calc_grid_ms / 1000.0
+            all_ts.append(calc_grid)
+            print(f"20Hz calc grid: {len(calc_grid)} points")
+
+            # Inject lap boundary timestamps so lap crossings land on exact rows
+            if self.session_info and 'laps' in self.session_info:
+                lap_ts = []
+                for lap in self.session_info['laps']:
+                    start_ms = lap.get('startTimestamp', 0)
+                    if start_ms:
+                        lap_ts.append(start_ms / 1000.0)
+                    finish_ms = lap.get('finishTimestamp', None)
+                    if finish_ms:
+                        lap_ts.append(finish_ms / 1000.0)
+                if lap_ts:
+                    all_ts.append(np.array(lap_ts))
+                    print(f"Lap boundary timestamps: {len(lap_ts)} points")
+
             combined = np.unique(np.concatenate(all_ts))
+            # Clip to GPS range (exclude sensor timestamps before first GPS fix)
+            combined = combined[(combined >= gps_start) & (combined <= combined[-1])]
             print(f"Union of all timestamps: {len(combined)} unique points")
 
         combined = np.sort(combined)
