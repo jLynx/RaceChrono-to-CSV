@@ -205,6 +205,109 @@
             font-weight: 600;
         }
 
+        .lap-panel {
+            margin-bottom: 30px;
+            background: #181a20;
+            border-radius: 12px;
+            border: 1px solid #2a2d35;
+            padding: 20px;
+        }
+
+        .lap-panel h2 {
+            font-size: 1.2rem;
+            color: #ccc;
+            margin-bottom: 16px;
+        }
+
+        .lap-controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .lap-controls button {
+            background: #1e2028;
+            border: 1px solid #2a2d35;
+            color: #ccc;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+
+        .lap-controls button:hover {
+            background: #2a2d35;
+        }
+
+        .lap-controls button.active {
+            background: #3b82f6;
+            border-color: #3b82f6;
+            color: #fff;
+        }
+
+        .lap-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .lap-card {
+            background: #1e2028;
+            border: 2px solid #2a2d35;
+            border-radius: 8px;
+            padding: 10px 14px;
+            cursor: pointer;
+            transition: all 0.15s;
+            min-width: 120px;
+            text-align: center;
+        }
+
+        .lap-card:hover {
+            border-color: #3b82f6;
+            background: #252830;
+        }
+
+        .lap-card.selected {
+            border-color: #3b82f6;
+            background: rgba(59, 130, 246, 0.15);
+        }
+
+        .lap-card.best {
+            border-color: #22c55e;
+        }
+
+        .lap-card.best.selected {
+            border-color: #22c55e;
+            background: rgba(34, 197, 94, 0.15);
+        }
+
+        .lap-card .lap-num {
+            font-size: 0.8rem;
+            color: #888;
+            margin-bottom: 4px;
+        }
+
+        .lap-card .lap-time {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #fff;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .lap-card.best .lap-time {
+            color: #22c55e;
+        }
+
+        .lap-card .lap-delta {
+            font-size: 0.75rem;
+            color: #ef4444;
+            margin-top: 2px;
+        }
+
+        .lap-card.best .lap-delta {
+            color: #22c55e;
+        }
+
         #hover-info {
             position: fixed;
             top: 10px;
@@ -239,6 +342,11 @@
     <div class="header">
         <h1 id="session-title"></h1>
         <div class="meta" id="session-meta"></div>
+    </div>
+    <div class="lap-panel" id="lap-panel" style="display:none;">
+        <h2>Lap Times</h2>
+        <div class="lap-controls" id="lap-controls"></div>
+        <div class="lap-grid" id="lap-grid"></div>
     </div>
     <div class="track-section">
         <div class="track-container">
@@ -290,6 +398,153 @@ const CHANNEL_COLORS = {
 };
 
 const DEFAULT_COLOR = '#6366f1';
+
+// ── Global state ─────────────────────────────────────────────────────────
+
+let globalParsed = null;
+let globalLaps = [];
+let selectedLaps = null; // null = show all, otherwise Set of lap numbers
+let chartInstances = [];
+
+// ── Lap extraction & rendering ───────────────────────────────────────────
+
+function extractLaps(parsed) {
+    // Group rows by lap_number
+    const lapGroups = {};
+    for (const row of parsed.data) {
+        const lapNum = row.lap_number;
+        if (lapNum == null) continue;
+        if (!lapGroups[lapNum]) {
+            lapGroups[lapNum] = { firstElapsed: row.elapsed_time, lastElapsed: row.elapsed_time };
+        }
+        if (row.elapsed_time != null) {
+            lapGroups[lapNum].lastElapsed = row.elapsed_time;
+        }
+    }
+
+    const lapNumbers = Object.keys(lapGroups).map(Number).sort((a, b) => a - b);
+    const laps = [];
+
+    for (let i = 0; i < lapNumbers.length; i++) {
+        const num = lapNumbers[i];
+        const group = lapGroups[num];
+        // Lap time = start of next lap - start of this lap (crossing to crossing)
+        // For last lap, use last elapsed - first elapsed
+        let lapTime;
+        if (i + 1 < lapNumbers.length) {
+            lapTime = lapGroups[lapNumbers[i + 1]].firstElapsed - group.firstElapsed;
+        } else {
+            lapTime = group.lastElapsed - group.firstElapsed;
+        }
+        laps.push({ number: num, time: lapTime, firstElapsed: group.firstElapsed, lastElapsed: group.lastElapsed });
+    }
+
+    return laps;
+}
+
+function formatLapTime(seconds) {
+    if (seconds == null || seconds < 0) return '--:--.---';
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds - mins * 60;
+    return mins + ':' + secs.toFixed(3).padStart(6, '0');
+}
+
+function renderLapPanel(laps) {
+    const panel = document.getElementById('lap-panel');
+    if (!laps || laps.length === 0) {
+        panel.style.display = 'none';
+        return;
+    }
+    panel.style.display = '';
+
+    // Find best lap (shortest time, excluding incomplete last lap if it's much shorter)
+    const fullLaps = laps.length > 1 ? laps.slice(0, -1) : laps;
+    const bestTime = fullLaps.reduce((a, b) => a.time < b.time ? a : b).time;
+
+    // Controls
+    const controls = document.getElementById('lap-controls');
+    controls.innerHTML = '';
+    const allBtn = document.createElement('button');
+    allBtn.textContent = 'All Laps';
+    allBtn.className = selectedLaps == null ? 'active' : '';
+    allBtn.addEventListener('click', () => {
+        selectedLaps = null;
+        renderLapPanel(globalLaps);
+        refreshView();
+    });
+    controls.appendChild(allBtn);
+
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear Selection';
+    clearBtn.className = '';
+    clearBtn.addEventListener('click', () => {
+        selectedLaps = new Set();
+        renderLapPanel(globalLaps);
+        refreshView();
+    });
+    controls.appendChild(clearBtn);
+
+    // Lap cards
+    const grid = document.getElementById('lap-grid');
+    grid.innerHTML = '';
+
+    for (const lap of laps) {
+        const card = document.createElement('div');
+        card.className = 'lap-card';
+        const isBest = Math.abs(lap.time - bestTime) < 0.001;
+        if (isBest) card.classList.add('best');
+        if (selectedLaps != null && selectedLaps.has(lap.number)) card.classList.add('selected');
+
+        const delta = lap.time - bestTime;
+        const deltaStr = isBest ? 'BEST' : '+' + delta.toFixed(3);
+
+        card.innerHTML = `
+            <div class="lap-num">Lap ${lap.number}</div>
+            <div class="lap-time">${formatLapTime(lap.time)}</div>
+            <div class="lap-delta">${deltaStr}</div>
+        `;
+
+        card.addEventListener('click', (e) => {
+            if (selectedLaps == null) {
+                // Switching from "all" to single lap
+                selectedLaps = new Set([lap.number]);
+            } else if (e.ctrlKey || e.metaKey) {
+                // Toggle this lap in multi-select
+                if (selectedLaps.has(lap.number)) {
+                    selectedLaps.delete(lap.number);
+                } else {
+                    selectedLaps.add(lap.number);
+                }
+                // If nothing selected, go back to all
+                if (selectedLaps.size === 0) selectedLaps = null;
+            } else {
+                // Single click = select only this lap
+                selectedLaps = new Set([lap.number]);
+            }
+            renderLapPanel(globalLaps);
+            refreshView();
+        });
+
+        grid.appendChild(card);
+    }
+}
+
+function getFilteredData(parsed) {
+    if (selectedLaps == null) return parsed.data;
+    if (selectedLaps.size === 0) return parsed.data;
+    return parsed.data.filter(row => row.lap_number != null && selectedLaps.has(row.lap_number));
+}
+
+function getFilteredParsed() {
+    const filteredData = getFilteredData(globalParsed);
+    return { ...globalParsed, data: filteredData };
+}
+
+function refreshView() {
+    const filteredData = getFilteredData(globalParsed);
+    initTrack(document.getElementById('track-canvas'), filteredData);
+    createCharts(getFilteredParsed());
+}
 
 // ── CSV parsing ──────────────────────────────────────────────────────────
 
@@ -404,14 +659,14 @@ function initTrack(canvas, data) {
 
     if (lats.length < 2) return;
 
-    const minLat = Math.min(...lats), maxLat = Math.max(...lats);
-    const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+    const minLat = lats.reduce((a, b) => a < b ? a : b), maxLat = lats.reduce((a, b) => a > b ? a : b);
+    const minLon = lons.reduce((a, b) => a < b ? a : b), maxLon = lons.reduce((a, b) => a > b ? a : b);
     const midLat = (minLat + maxLat) / 2;
     const lonScale = Math.cos(midLat * Math.PI / 180);
 
     const validSpeeds = speeds.filter(s => s != null && s > 0);
-    const minSpeed = validSpeeds.length ? Math.min(...validSpeeds) : 0;
-    const maxSpeed = validSpeeds.length ? Math.max(...validSpeeds) : 1;
+    const minSpeed = validSpeeds.length ? validSpeeds.reduce((a, b) => a < b ? a : b) : 0;
+    const maxSpeed = validSpeeds.length ? validSpeeds.reduce((a, b) => a > b ? a : b) : 1;
 
     // Pre-compute color per segment as RGB array for speed
     const colors = speeds.map(spd => speedColor(spd, minSpeed, maxSpeed));
@@ -622,6 +877,12 @@ function lerpColor(a, b, t) {
 // ── Charts ───────────────────────────────────────────────────────────────
 
 function createCharts(parsed) {
+    // Destroy previous chart instances
+    for (const chart of chartInstances) {
+        chart.destroy();
+    }
+    chartInstances = [];
+
     const grid = document.getElementById('charts-grid');
     grid.innerHTML = '';
 
@@ -649,8 +910,8 @@ function createCharts(parsed) {
         const card = document.createElement('div');
         card.className = 'chart-card';
 
-        const minVal = Math.min(...nonNull);
-        const maxVal = Math.max(...nonNull);
+        const minVal = nonNull.reduce((a, b) => a < b ? a : b);
+        const maxVal = nonNull.reduce((a, b) => a > b ? a : b);
         const avgVal = nonNull.reduce((a, b) => a + b, 0) / nonNull.length;
 
         card.innerHTML = `
@@ -680,7 +941,7 @@ function createCharts(parsed) {
             }
         }
 
-        new Chart(canvas, {
+        chartInstances.push(new Chart(canvas, {
             type: 'line',
             data: {
                 labels: chartElapsed,
@@ -740,7 +1001,7 @@ function createCharts(parsed) {
                     }
                 }
             }
-        });
+        }));
     }
 }
 
@@ -751,13 +1012,14 @@ function formatNum(n) {
 
 // ── Session metadata ─────────────────────────────────────────────────────
 
-function renderMeta(parsed) {
+function renderMeta(parsed, fileName) {
     const m = parsed.meta;
     const title = m.session_title || m.track_name || 'Session';
     document.getElementById('session-title').textContent = title;
 
     const metaDiv = document.getElementById('session-meta');
     const items = [];
+    if (fileName) items.push(['File', fileName]);
     if (m.track_name) items.push(['Track', m.track_name]);
     if (m.session_type) items.push(['Type', m.session_type]);
     if (m.created) items.push(['Date', m.created]);
@@ -829,7 +1091,14 @@ function handleFile(file) {
         dropZone.style.display = 'none';
         dashboard.classList.add('visible');
 
-        renderMeta(parsed);
+        globalParsed = parsed;
+        selectedLaps = null;
+
+        // Extract and render laps
+        globalLaps = extractLaps(parsed);
+        renderLapPanel(globalLaps);
+
+        renderMeta(parsed, file.name);
         initTrack(document.getElementById('track-canvas'), parsed.data);
         createCharts(parsed);
     };
