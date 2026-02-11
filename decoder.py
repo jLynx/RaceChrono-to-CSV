@@ -516,16 +516,23 @@ class RaceChronoDecoder:
                     })
                     print(f"[OK] {source}: {len(timestamps)} points, channels: {', '.join(col_names)}")
 
-    def _compute_device_update_rates(self, timestamps):
-        """Compute instantaneous update rate (Hz) from a timestamp array.
-        Returns array of same length with rate = 1/dt for each sample."""
-        if len(timestamps) < 2:
-            return np.full(len(timestamps), np.nan)
-        rates = np.full(len(timestamps), np.nan)
-        dt = np.diff(timestamps)
-        rates[1:] = 1.0 / np.where(dt > 0, dt, np.nan)
-        # Set first sample rate = second sample rate
-        rates[0] = rates[1]
+    def _compute_device_update_rates(self, timestamps, window_sec=1.0):
+        """Compute smoothed update rate (Hz) using a trailing window.
+        For each sample, counts intervals in the last window_sec seconds.
+        Returns array of same length."""
+        n = len(timestamps)
+        if n < 2:
+            return np.full(n, np.nan)
+        rates = np.full(n, np.nan)
+        left = 0
+        for i in range(1, n):
+            # Advance left pointer to keep window within window_sec
+            while left < i - 1 and timestamps[i] - timestamps[left] > window_sec:
+                left += 1
+            dt = timestamps[i] - timestamps[left]
+            if dt > 0:
+                rates[i] = (i - left) / dt
+        rates[0] = rates[1] if n > 1 else np.nan
         return rates
 
     def _interp_nan_aware(self, x_new, x_orig, y_orig):
@@ -694,34 +701,103 @@ class RaceChronoDecoder:
         self.decode_sensor_channels()
         self.resample_to_common_timeline()
 
+    @staticmethod
+    def _smooth_raw(values, half_window=3):
+        """Apply simple moving average smoothing to raw data, NaN-aware.
+        half_window=3 means window of 7 samples (i-3 to i+3)."""
+        n = len(values)
+        smoothed = np.full(n, np.nan)
+        for i in range(n):
+            lo = max(0, i - half_window)
+            hi = min(n, i + half_window + 1)
+            window = values[lo:hi]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                smoothed[i] = np.mean(valid)
+        return smoothed
+
     def _compute_calculated_fields(self):
-        """Compute derived fields: longitudinal_acc, calc speed."""
-        if 'speed' not in self.resampled_data:
+        """Compute derived fields from GPS data at raw GPS rate, then interpolate.
+        Fields: longitudinal_acc, lateral_acc, combined_acc, lean_angle, calc_speed."""
+        if 'speed' not in self.resampled_data or 'speed' not in self.channels:
             return
 
-        timestamps = self.resampled_data['timestamp']
-        speed = self.resampled_data['speed']
-        num_rows = len(timestamps)
-
-        # Compute longitudinal acceleration (G)
-        # longitudinal_acc = delta_speed / delta_time / 9.81
-        # Official app has ~0.4s warmup before producing longitudinal_acc values
+        combined_ts = self.resampled_data['timestamp']
+        num_rows = len(combined_ts)
         elapsed = self.resampled_data['elapsed_time']
-        long_acc = np.full(num_rows, np.nan)
-        for i in range(1, num_rows):
-            if elapsed[i] < 0.45 - 1e-6:
-                continue  # Warmup period - no output
-            if not np.isnan(speed[i]) and not np.isnan(speed[i-1]):
-                dt = timestamps[i] - timestamps[i-1]
-                if dt > 0:
-                    long_acc[i] = (speed[i] - speed[i-1]) / dt / 9.81
 
-        self.resampled_data['longitudinal_acc'] = long_acc
+        # Get raw GPS speed and bearing for derivative computation
+        raw_speed = self.channels['speed'].values
+        raw_ts = self.channels['speed'].timestamps
+        n_gps = len(raw_ts)
+
+        # Use wider central difference (N=3) for smoother derivatives
+        N = 3
+
+        # --- Longitudinal acceleration (from raw GPS speed) ---
+        raw_long_acc = np.full(n_gps, np.nan)
+        for i in range(N, n_gps - N):
+            dt = raw_ts[i + N] - raw_ts[i - N]
+            if dt > 0 and not np.isnan(raw_speed[i + N]) and not np.isnan(raw_speed[i - N]):
+                raw_long_acc[i] = (raw_speed[i + N] - raw_speed[i - N]) / dt / 9.81
+        # Fill edges with narrower differences
+        for i in range(1, N):
+            dt = raw_ts[i + 1] - raw_ts[i - 1]
+            if dt > 0 and not np.isnan(raw_speed[i + 1]) and not np.isnan(raw_speed[i - 1]):
+                raw_long_acc[i] = (raw_speed[i + 1] - raw_speed[i - 1]) / dt / 9.81
+        for i in range(n_gps - N, n_gps - 1):
+            dt = raw_ts[min(i + 1, n_gps - 1)] - raw_ts[max(i - 1, 0)]
+            if dt > 0:
+                raw_long_acc[i] = (raw_speed[min(i + 1, n_gps - 1)] - raw_speed[max(i - 1, 0)]) / dt / 9.81
+
+        # Apply smoothing pass
+        raw_long_acc = self._smooth_raw(raw_long_acc, half_window=2)
+
+        # Interpolate to combined timeline with warmup period
+        long_acc_interp = self._interp_nan_aware(combined_ts, raw_ts, raw_long_acc)
+        long_acc_interp[elapsed < 0.45 - 1e-6] = np.nan
+        self.resampled_data['longitudinal_acc'] = long_acc_interp
+
+        # --- Lateral acceleration (from GPS speed and bearing) ---
+        raw_lat_acc = np.full(n_gps, np.nan)
+        if 'bearing' in self.channels:
+            raw_bearing = self.channels['bearing'].values
+            for i in range(N, n_gps - N):
+                dt = raw_ts[i + N] - raw_ts[i - N]
+                if dt > 0 and not np.isnan(raw_bearing[i + N]) and not np.isnan(raw_bearing[i - N]):
+                    db = raw_bearing[i + N] - raw_bearing[i - N]
+                    # Handle 0/360 wrapping
+                    if db > 180:
+                        db -= 360
+                    elif db < -180:
+                        db += 360
+                    yaw_rate = math.radians(db) / dt
+                    spd = raw_speed[i] if not np.isnan(raw_speed[i]) else 0
+                    # Negate to match RaceChrono sign convention
+                    raw_lat_acc[i] = -(spd * yaw_rate / 9.81)
+
+            # Apply smoothing pass
+            raw_lat_acc = self._smooth_raw(raw_lat_acc, half_window=2)
+
+        lat_acc_interp = self._interp_nan_aware(combined_ts, raw_ts, raw_lat_acc)
+        lat_acc_interp[elapsed < 0.45 - 1e-6] = np.nan
+        self.resampled_data['lateral_acc'] = lat_acc_interp
+
+        # --- Combined acceleration ---
+        combined_acc = np.full(num_rows, np.nan)
+        valid = ~np.isnan(long_acc_interp) & ~np.isnan(lat_acc_interp)
+        combined_acc[valid] = np.sqrt(long_acc_interp[valid] ** 2 + lat_acc_interp[valid] ** 2)
+        self.resampled_data['combined_acc'] = combined_acc
+
+        # --- Lean angle: atan(-lateral_acc) to match RaceChrono convention ---
+        lean_angle = np.full(num_rows, np.nan)
+        lean_angle[valid] = np.degrees(np.arctan(-lat_acc_interp[valid]))
+        self.resampled_data['lean_angle'] = lean_angle
 
         # Calc speed = copy of GPS speed
-        self.resampled_data['calc_speed'] = speed.copy()
+        self.resampled_data['calc_speed'] = self.resampled_data['speed'].copy()
 
-        print(f"[OK] Computed longitudinal_acc and calc speed")
+        print("[OK] Computed longitudinal_acc, lateral_acc, combined_acc, lean_angle, calc speed")
 
     @staticmethod
     def _fmt(value, decimals=5):
@@ -932,18 +1008,13 @@ class RaceChronoDecoder:
                         row.append('')
 
                 # Calc columns
-                row.append('')  # combined_acc
-                row.append('20.0')  # device_update_rate (calc)
-                row.append('')  # lateral_acc
-                row.append('')  # lean_angle
-                if 'longitudinal_acc' in self.resampled_data:
-                    row.append(fmt(self.resampled_data['longitudinal_acc'][i], 5))
-                else:
-                    row.append('')
-                if 'calc_speed' in self.resampled_data:
-                    row.append(fmt(self.resampled_data['calc_speed'][i], 5))
-                else:
-                    row.append('')
+                for calc_key in ['combined_acc', None, 'lateral_acc', 'lean_angle', 'longitudinal_acc', 'calc_speed']:
+                    if calc_key is None:
+                        row.append('20.0')  # device_update_rate (calc) - static
+                    elif calc_key in self.resampled_data:
+                        row.append(fmt(self.resampled_data[calc_key][i], 5))
+                    else:
+                        row.append('')
 
                 # CAN bus columns
                 for can_name in canbus_columns:
